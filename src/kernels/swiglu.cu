@@ -103,7 +103,7 @@ int num_sms() {
         int dev = 0;
         SPARK_CUDA_CHECK(cudaGetDevice(&dev));
         SPARK_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
-        if (sms <= 0) sms = 48;  // GB10 fallback
+        if (sms <= 0) sms = 48;  // GB10 SM count (RTX 5090: 170)
     }
     return sms;
 }
@@ -114,6 +114,7 @@ bool aligned16(const void* p) {
 
 // Grid for the grid-stride vector kernels: enough blocks to fill the machine several times
 // over (8 blocks x 256 threads per SM), but never more blocks than there is vector work.
+// The factor of 8 was picked for GB10 (48 SMs); re-tune on the RTX 5090 (170 SMs).
 unsigned vec_grid(int64_t n_vec) {
     const int64_t want = static_cast<int64_t>(num_sms()) * 8;
     const int64_t need = cdiv64(n_vec, kBlock);

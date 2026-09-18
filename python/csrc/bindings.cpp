@@ -196,7 +196,7 @@ int num_variants(const std::string& name) {
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "spark-kernels: hand-written CUDA kernels for LLM inference on GB10 (sm_121)";
+    m.doc() = "spark-kernels: hand-written CUDA kernels for LLM inference on sm_120 / sm_121";
     m.def("rmsnorm", &rmsnorm, "RMSNorm over the last dim", py::arg("x"), py::arg("w"),
           py::arg("eps") = 1e-6, py::arg("variant") = -1);
     m.def("add_rmsnorm_", &add_rmsnorm_, "resid += x; return rmsnorm(resid) * w (bf16, in place)",

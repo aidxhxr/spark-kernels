@@ -1,4 +1,6 @@
-"""spark-kernels: hand-written CUDA kernels for LLM inference on the NVIDIA DGX Spark.
+"""spark-kernels: hand-written CUDA kernels for LLM inference on Blackwell RTX 5090 (sm_120).
+
+Also builds for the NVIDIA DGX Spark (GB10, sm_121) with TORCH_CUDA_ARCH_LIST="12.1".
 
 Ops (all run on the current CUDA stream, all accept float32 or bfloat16 unless noted):
 

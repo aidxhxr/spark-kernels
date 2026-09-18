@@ -1,5 +1,6 @@
 // Shared helpers for every kernel in spark-kernels.
-// Target: NVIDIA GB10 (DGX Spark), compute capability 12.1, CUDA 13.x.
+// Primary target: NVIDIA RTX 5090 (GB202), compute capability 12.0 (sm_120), CUDA 13.x.
+// Secondary target: NVIDIA GB10 (DGX Spark), compute capability 12.1 (sm_121).
 #pragma once
 
 #include <cuda_bf16.h>
@@ -122,7 +123,7 @@ __device__ __forceinline__ __nv_bfloat16 from_f32<__nv_bfloat16>(float v) {
 }
 
 // Vector-of-8 loads for bf16 (16 bytes) and vector-of-4 for f32 (16 bytes).
-// Both are "one 128-bit transaction per thread" — the ideal width on GB10.
+// Both are "one 128-bit transaction per thread" — the ideal width on Blackwell sm_12x.
 struct __align__(16) bf16x8 {
     __nv_bfloat162 h[4];
 };
@@ -131,7 +132,7 @@ struct __align__(16) f32x4 {
 };
 
 // ---------------------------------------------------------------------------
-// cp.async (Ampere+; available on sm_121). 16-byte global->shared copy that
+// cp.async (Ampere+; available on sm_120 / sm_121). 16-byte global->shared copy that
 // bypasses registers. Used by the double-buffered GEMM pipelines.
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ void cp_async_16(void* smem_ptr, const void* gmem_ptr) {

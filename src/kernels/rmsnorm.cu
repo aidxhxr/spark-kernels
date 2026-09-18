@@ -119,7 +119,8 @@ __global__ void rmsnorm_warp_kernel(const T* __restrict__ x, const T* __restrict
 // ---------------------------------------------------------------------------
 // Variant 2: one warp per row, 128-bit vectorized loads/stores.
 // Pass 1 reads the row once from DRAM to compute the sum of squares; pass 2
-// re-reads it (row <= 16 KB, served from the 24 MB L2) and writes the output.
+// re-reads it (row <= 16 KB, served from L2: 24 MB on GB10, TBD on the RTX 5090) and
+// writes the output.
 // Requires cols % kWidth == 0.
 // ---------------------------------------------------------------------------
 template <typename T, int kWarpsPerBlock>

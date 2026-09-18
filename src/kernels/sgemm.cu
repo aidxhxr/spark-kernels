@@ -1,4 +1,4 @@
-// fp32 GEMM optimization ladder for GB10 (sm_121).
+// fp32 GEMM optimization ladder for Blackwell sm_12x: RTX 5090 (sm_120), GB10 (sm_121).
 //
 //   C[M,N] = A[M,K] * B[K,N]   (row-major, fp32 in/out, fp32 accumulate)
 //
@@ -10,7 +10,8 @@
 //            with a +4 pad so the strided fragment reads are bank-conflict free)
 //
 // All variants accept arbitrary M, N, K >= 1 and guard every global access.
-// See docs/design/sgemm.md for the reasoning behind each rung.
+// See docs/design/sgemm.md for the reasoning behind each rung. Tile sizes are GB10-derived
+// (48 SMs, 273 GB/s); re-tune on the RTX 5090 (170 SMs, 1,792 GB/s GDDR7).
 
 #include "spark/common.cuh"
 #include "spark/kernels.h"

@@ -2,10 +2,12 @@
 //
 // This kernel does no arithmetic, so its throughput is the practical ceiling for every
 // memory-bound kernel in this repo (RMSNorm, SwiGLU, softmax). The three variants walk the
-// usual optimization ladder for a streaming kernel on GB10:
+// usual optimization ladder for a streaming kernel on the RTX 5090 / GB10:
 //   0: one float per thread, one block per 256 elements (naive)
 //   1: one float4 (16 bytes) per thread -> one 128-bit transaction per lane
 //   2: float4 + grid-stride loop with a fixed, occupancy-sized grid (~4 blocks per SM)
+// The blocks-per-SM factor was picked for GB10 (48 SMs, 273 GB/s LPDDR5X); re-tune it on the
+// RTX 5090 (170 SMs, 1,792 GB/s GDDR7).
 #include <cstdint>
 
 #include "spark/common.cuh"
@@ -49,7 +51,7 @@ int num_sms() {
         int dev = 0;
         SPARK_CUDA_CHECK(cudaGetDevice(&dev));
         SPARK_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
-        if (sms <= 0) sms = 48;  // GB10 fallback
+        if (sms <= 0) sms = 48;  // GB10 SM count (RTX 5090: 170)
     }
     return sms;
 }

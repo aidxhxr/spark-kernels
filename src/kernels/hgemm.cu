@@ -1,17 +1,18 @@
-// bf16 tensor-core GEMM ladder for GB10 (sm_121).
+// bf16 tensor-core GEMM ladder for Blackwell sm_12x: RTX 5090 (sm_120), GB10 (sm_121).
 //
 //   C[M,N] = A[M,K] * B[K,N]      row-major, bf16 in/out, fp32 accumulate
 //
 // All variants use the WMMA API, which lowers to mma.sync tensor-core instructions.
-// GB10 is a consumer/workstation-lineage Blackwell (sm_121): it supports mma.sync but NOT the
-// datacenter-only tcgen05 / TMA path of sm_100 (B200). WMMA / mma.sync is therefore the right
-// portable tool here.
+// The RTX 5090 and GB10 are consumer/workstation-lineage Blackwell (sm_120 / sm_121): they
+// support mma.sync but NOT the datacenter-only tcgen05 / TMA path of sm_100 (B200). WMMA /
+// mma.sync is therefore the right portable tool here.
 //
 //   variant 0: one warp per 16x16 C tile, fragments loaded straight from global memory.
 //   variant 1: 128x128x32 block tile, 8 warps (2x4), shared-memory staged with +8 padding.
 //   variant 2: variant 1 + two-stage cp.async pipeline (load tile k+1 while computing tile k).
 //
-// See docs/design/hgemm.md for the analysis.
+// Tile sizes come from the GB10 analysis (48 SMs, 273 GB/s, 24 MB L2) in
+// docs/design/hgemm.md; re-tune on the RTX 5090 (170 SMs, 1,792 GB/s GDDR7).
 
 #include <mma.h>  // after cuda_bf16.h (pulled in by common.cuh)
 
