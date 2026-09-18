@@ -119,8 +119,8 @@ Tensor swiglu(const Tensor& gate, const Tensor& up, int variant) {
     cudaStream_t stream = current_stream(gate);
     const int64_t n = gate.numel();
     if (gate.scalar_type() == at::kFloat) {
-        spark::swiglu_f32(gate.data_ptr<float>(), up.data_ptr<float>(), out.data_ptr<float>(), n,
-                          v, stream);
+        spark::swiglu_f32(gate.data_ptr<float>(), up.data_ptr<float>(), out.data_ptr<float>(), n, v,
+                          stream);
     } else {
         spark::swiglu_bf16(bf16_ptr(gate), bf16_ptr(up), bf16_ptr_mut(out), n, v, stream);
     }

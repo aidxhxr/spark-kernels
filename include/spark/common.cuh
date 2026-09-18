@@ -17,13 +17,13 @@ namespace spark {
 // ---------------------------------------------------------------------------
 // Error handling
 // ---------------------------------------------------------------------------
-#define SPARK_CUDA_CHECK(expr)                                                              \
-    do {                                                                                    \
-        cudaError_t _err = (expr);                                                          \
-        if (_err != cudaSuccess) {                                                          \
+#define SPARK_CUDA_CHECK(expr)                                                                \
+    do {                                                                                      \
+        cudaError_t _err = (expr);                                                            \
+        if (_err != cudaSuccess) {                                                            \
             throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(_err) + \
-                                     " at " + __FILE__ + ":" + std::to_string(__LINE__));    \
-        }                                                                                   \
+                                     " at " + __FILE__ + ":" + std::to_string(__LINE__));     \
+        }                                                                                     \
     } while (0)
 
 // Check the most recent kernel launch (call right after <<<>>>).
@@ -37,7 +37,9 @@ namespace spark {
 // ---------------------------------------------------------------------------
 // Small host/device utilities
 // ---------------------------------------------------------------------------
-__host__ __device__ __forceinline__ constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
+__host__ __device__ __forceinline__ constexpr int cdiv(int a, int b) {
+    return (a + b - 1) / b;
+}
 __host__ __device__ __forceinline__ constexpr int64_t cdiv64(int64_t a, int64_t b) {
     return (a + b - 1) / b;
 }
@@ -101,8 +103,12 @@ __device__ __forceinline__ float block_reduce_max(float v, float* smem) {
 // ---------------------------------------------------------------------------
 // bf16 <-> f32 conversion helpers (uniform names for both element types)
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ float to_f32(float v) { return v; }
-__device__ __forceinline__ float to_f32(__nv_bfloat16 v) { return __bfloat162float(v); }
+__device__ __forceinline__ float to_f32(float v) {
+    return v;
+}
+__device__ __forceinline__ float to_f32(__nv_bfloat16 v) {
+    return __bfloat162float(v);
+}
 
 template <typename T>
 __device__ __forceinline__ T from_f32(float v);

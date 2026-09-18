@@ -39,7 +39,7 @@ __global__ void sgemm_naive_kernel(const float* __restrict__ A, const float* __r
 // ---------------------------------------------------------------------------
 constexpr int kTile1 = 32;
 
-__global__ void __launch_bounds__(kTile1 * kTile1)
+__global__ void __launch_bounds__(kTile1* kTile1)
     sgemm_smem_kernel(const float* __restrict__ A, const float* __restrict__ B,
                       float* __restrict__ C, int M, int N, int K) {
     __shared__ float As[kTile1][kTile1];
@@ -134,8 +134,8 @@ __device__ __forceinline__ void store_c_chunk(float* __restrict__ C, int M, int 
 template <int BM, int BN, int TM, int TN>
 struct MicroTile {
     static_assert(TM == 8 && TN == 8, "layout below assumes 8x8 micro-tiles");
-    static constexpr int kThreadsY = BM / TM;  // 16
-    static constexpr int kThreadsX = BN / TN;  // 16
+    static constexpr int kThreadsY = BM / TM;               // 16
+    static constexpr int kThreadsX = BN / TN;               // 16
     static constexpr int kThreads = kThreadsY * kThreadsX;  // 256
     static constexpr int kHalfM = BM / 2;
     static constexpr int kHalfN = BN / 2;
@@ -169,11 +169,11 @@ __global__ void __launch_bounds__(MicroTile<BM, BN, TM, TN>::kThreads)
     const int bn = blockIdx.x * BN;
 
     // Global -> smem load assignment: one 4-wide chunk of A and one of B per thread.
-    constexpr int kAChunksPerRow = BK / 4;      // 2
-    constexpr int kBChunksPerRow = BN / 4;      // 32
-    const int a_row = tid / kAChunksPerRow;     // 0..127
+    constexpr int kAChunksPerRow = BK / 4;   // 2
+    constexpr int kBChunksPerRow = BN / 4;   // 32
+    const int a_row = tid / kAChunksPerRow;  // 0..127
     const int a_k0 = (tid % kAChunksPerRow) * 4;
-    const int b_k = tid / kBChunksPerRow;       // 0..7
+    const int b_k = tid / kBChunksPerRow;  // 0..7
     const int b_col0 = (tid % kBChunksPerRow) * 4;
 
     float acc[TM][TN];
@@ -203,12 +203,24 @@ __global__ void __launch_bounds__(MicroTile<BM, BN, TM, TN>::kThreads)
             float b[TN];
             const float4 a0 = *reinterpret_cast<const float4*>(&As[k][ty * 4]);
             const float4 a1 = *reinterpret_cast<const float4*>(&As[k][MT::kHalfM + ty * 4]);
-            a[0] = a0.x; a[1] = a0.y; a[2] = a0.z; a[3] = a0.w;
-            a[4] = a1.x; a[5] = a1.y; a[6] = a1.z; a[7] = a1.w;
+            a[0] = a0.x;
+            a[1] = a0.y;
+            a[2] = a0.z;
+            a[3] = a0.w;
+            a[4] = a1.x;
+            a[5] = a1.y;
+            a[6] = a1.z;
+            a[7] = a1.w;
             const float4 b0 = *reinterpret_cast<const float4*>(&Bs[k][tx * 4]);
             const float4 b1 = *reinterpret_cast<const float4*>(&Bs[k][MT::kHalfN + tx * 4]);
-            b[0] = b0.x; b[1] = b0.y; b[2] = b0.z; b[3] = b0.w;
-            b[4] = b1.x; b[5] = b1.y; b[6] = b1.z; b[7] = b1.w;
+            b[0] = b0.x;
+            b[1] = b0.y;
+            b[2] = b0.z;
+            b[3] = b0.w;
+            b[4] = b1.x;
+            b[5] = b1.y;
+            b[6] = b1.z;
+            b[7] = b1.w;
 #pragma unroll
             for (int i = 0; i < TM; ++i)
 #pragma unroll
@@ -328,8 +340,14 @@ __global__ void __launch_bounds__(MicroTile<BM, BN, TM, TN>::kThreads)
             for (int i = 0; i < TM; ++i) a[i] = As[cur][MT::row_of(ty, i)][k];
             const float4 b0 = *reinterpret_cast<const float4*>(&Bs[cur][k][tx * 4]);
             const float4 b1 = *reinterpret_cast<const float4*>(&Bs[cur][k][MT::kHalfN + tx * 4]);
-            b[0] = b0.x; b[1] = b0.y; b[2] = b0.z; b[3] = b0.w;
-            b[4] = b1.x; b[5] = b1.y; b[6] = b1.z; b[7] = b1.w;
+            b[0] = b0.x;
+            b[1] = b0.y;
+            b[2] = b0.z;
+            b[3] = b0.w;
+            b[4] = b1.x;
+            b[5] = b1.y;
+            b[6] = b1.z;
+            b[7] = b1.w;
 #pragma unroll
             for (int i = 0; i < TM; ++i)
 #pragma unroll
@@ -353,7 +371,9 @@ __global__ void __launch_bounds__(MicroTile<BM, BN, TM, TN>::kThreads)
 // ---------------------------------------------------------------------------
 // Host entry point
 // ---------------------------------------------------------------------------
-int sgemm_num_variants() { return 4; }
+int sgemm_num_variants() {
+    return 4;
+}
 
 void sgemm(const float* A, const float* B, float* C, int M, int N, int K, int variant,
            cudaStream_t stream) {

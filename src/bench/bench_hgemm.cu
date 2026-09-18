@@ -17,14 +17,14 @@
 #include "bench_common.hpp"
 #include "spark/kernels.h"
 
-#define CUBLAS_CHECK(expr)                                                                   \
-    do {                                                                                     \
-        cublasStatus_t _st = (expr);                                                         \
-        if (_st != CUBLAS_STATUS_SUCCESS) {                                                  \
-            std::fprintf(stderr, "cuBLAS error %d at %s:%d\n", static_cast<int>(_st),       \
-                         __FILE__, __LINE__);                                                \
-            std::exit(1);                                                                    \
-        }                                                                                    \
+#define CUBLAS_CHECK(expr)                                                                      \
+    do {                                                                                        \
+        cublasStatus_t _st = (expr);                                                            \
+        if (_st != CUBLAS_STATUS_SUCCESS) {                                                     \
+            std::fprintf(stderr, "cuBLAS error %d at %s:%d\n", static_cast<int>(_st), __FILE__, \
+                         __LINE__);                                                             \
+            std::exit(1);                                                                       \
+        }                                                                                       \
     } while (0)
 
 namespace {
@@ -68,8 +68,10 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
     SPARK_CUDA_CHECK(cudaMalloc(&dB, nB * sizeof(__nv_bfloat16)));
     SPARK_CUDA_CHECK(cudaMalloc(&dC, nC * sizeof(__nv_bfloat16)));
     SPARK_CUDA_CHECK(cudaMalloc(&dRef, nC * sizeof(__nv_bfloat16)));
-    SPARK_CUDA_CHECK(cudaMemcpy(dA, hAb.data(), nA * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
-    SPARK_CUDA_CHECK(cudaMemcpy(dB, hBb.data(), nB * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+    SPARK_CUDA_CHECK(
+        cudaMemcpy(dA, hAb.data(), nA * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+    SPARK_CUDA_CHECK(
+        cudaMemcpy(dB, hBb.data(), nB * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
     SPARK_CUDA_CHECK(cudaMemset(dC, 0, nC * sizeof(__nv_bfloat16)));
 
     // Reference.
@@ -99,7 +101,10 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
         }
     } catch (const std::invalid_argument& e) {
         std::fprintf(stderr, "  skip variant %d shape %dx%dx%d: %s\n", variant, M, N, K, e.what());
-        cudaFree(dA); cudaFree(dB); cudaFree(dC); cudaFree(dRef);
+        cudaFree(dA);
+        cudaFree(dB);
+        cudaFree(dC);
+        cudaFree(dRef);
         return true;  // unsupported shape is not a failure
     }
 
@@ -144,8 +149,8 @@ int main(int argc, char** argv) {
         const int m = args.geti("m", 4096);
         shapes.push_back({m, args.geti("n", m), args.geti("k", m)});
     } else {
-        shapes = {{1024, 1024, 1024},  {2048, 2048, 2048},  {4096, 4096, 4096},
-                  {8192, 8192, 8192},  {4096, 4096, 11008}, {4096, 11008, 4096}};
+        shapes = {{1024, 1024, 1024}, {2048, 2048, 2048},  {4096, 4096, 4096},
+                  {8192, 8192, 8192}, {4096, 4096, 11008}, {4096, 11008, 4096}};
     }
     const int iters = args.geti("iters", 50);
     std::vector<int> variants;

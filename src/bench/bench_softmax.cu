@@ -117,8 +117,8 @@ bool run_shape(int rows, int cols, int iters, cudaStream_t stream) {
 
         // Timing. The naive variant is very slow on long rows: fewer iterations.
         const int it = (variant == 0) ? std::max(10, iters / 10) : iters;
-        const Timing t = time_kernel(
-            [&]() { launch<T>(dx, dout, rows, cols, variant, stream); }, stream, 5, it);
+        const Timing t =
+            time_kernel([&]() { launch<T>(dx, dout, rows, cols, variant, stream); }, stream, 5, it);
         if (variant == 0) ref_ms = t.median_ms;
 
         Row r;

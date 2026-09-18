@@ -21,7 +21,8 @@ std::string shape_str(int64_t n) {
 bool run_size(int64_t n, int iters, cudaStream_t stream) {
     const size_t bytes = static_cast<size_t>(n) * sizeof(float);
     std::vector<float> h_x(static_cast<size_t>(n));
-    for (int64_t i = 0; i < n; ++i) h_x[static_cast<size_t>(i)] = static_cast<float>(i % 8191) * 0.25f;
+    for (int64_t i = 0; i < n; ++i)
+        h_x[static_cast<size_t>(i)] = static_cast<float>(i % 8191) * 0.25f;
     std::vector<float> h_y(static_cast<size_t>(n));
 
     float *d_x = nullptr, *d_y = nullptr;
@@ -31,7 +32,9 @@ bool run_size(int64_t n, int iters, cudaStream_t stream) {
 
     // Reference: cudaMemcpy device-to-device.
     const Timing ref = time_kernel(
-        [&] { SPARK_CUDA_CHECK(cudaMemcpyAsync(d_y, d_x, bytes, cudaMemcpyDeviceToDevice, stream)); },
+        [&] {
+            SPARK_CUDA_CHECK(cudaMemcpyAsync(d_y, d_x, bytes, cudaMemcpyDeviceToDevice, stream));
+        },
         stream, 5, iters);
     const double moved_gb = 2.0 * static_cast<double>(bytes) / 1e9;
     {
@@ -56,8 +59,8 @@ bool run_size(int64_t n, int iters, cudaStream_t stream) {
         const bool ok = std::memcmp(h_x.data(), h_y.data(), bytes) == 0;
         all_ok = all_ok && ok;
 
-        const Timing t = time_kernel([&] { spark::bandwidth_copy(d_x, d_y, n, v, stream); },
-                                     stream, 5, iters);
+        const Timing t =
+            time_kernel([&] { spark::bandwidth_copy(d_x, d_y, n, v, stream); }, stream, 5, iters);
         Row r;
         r.kernel = "bandwidth_copy";
         r.dtype = "f32";

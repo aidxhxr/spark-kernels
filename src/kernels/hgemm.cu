@@ -13,10 +13,10 @@
 //
 // See docs/design/hgemm.md for the analysis.
 
+#include <mma.h>  // after cuda_bf16.h (pulled in by common.cuh)
+
 #include "spark/common.cuh"
 #include "spark/kernels.h"
-
-#include <mma.h>  // after cuda_bf16.h (pulled in by common.cuh)
 
 namespace spark {
 
@@ -28,8 +28,10 @@ constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 16;
 
-using FragA = wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __nv_bfloat16, wmma::row_major>;
-using FragB = wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __nv_bfloat16, wmma::row_major>;
+using FragA =
+    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __nv_bfloat16, wmma::row_major>;
+using FragB =
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __nv_bfloat16, wmma::row_major>;
 using FragC = wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>;
 
 // Convert 8 fp32 values (16-byte aligned source) into 8 bf16 packed as one uint4 store.
@@ -53,10 +55,9 @@ __device__ __forceinline__ uint4 pack8_bf16(const float* src) {
 constexpr int V0_TILE = 32;
 constexpr int V0_THREADS = 128;
 
-__global__ void __launch_bounds__(V0_THREADS) hgemm_v0_kernel(const __nv_bfloat16* __restrict__ A,
-                                                              const __nv_bfloat16* __restrict__ B,
-                                                              __nv_bfloat16* __restrict__ C, int M,
-                                                              int N, int K) {
+__global__ void __launch_bounds__(V0_THREADS)
+    hgemm_v0_kernel(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B,
+                    __nv_bfloat16* __restrict__ C, int M, int N, int K) {
     __shared__ __align__(32) float scratch[4][WMMA_M * WMMA_N];
 
     const int warp_id = threadIdx.x >> 5;
@@ -93,14 +94,14 @@ __global__ void __launch_bounds__(V0_THREADS) hgemm_v0_kernel(const __nv_bfloat1
 constexpr int BM = 128;
 constexpr int BN = 128;
 constexpr int BK = 32;
-constexpr int PAD = 8;                 // +8 bf16 = +16 bytes per row: kills bank conflicts
-constexpr int A_LD = BK + PAD;         // 40 elements (80 bytes) per smem row of A
-constexpr int B_LD = BN + PAD;         // 136 elements (272 bytes) per smem row of B
-constexpr int TILE_THREADS = 256;      // 8 warps
-constexpr int WARPS_M = 2;             // warp grid 2 (M) x 4 (N)
+constexpr int PAD = 8;             // +8 bf16 = +16 bytes per row: kills bank conflicts
+constexpr int A_LD = BK + PAD;     // 40 elements (80 bytes) per smem row of A
+constexpr int B_LD = BN + PAD;     // 136 elements (272 bytes) per smem row of B
+constexpr int TILE_THREADS = 256;  // 8 warps
+constexpr int WARPS_M = 2;         // warp grid 2 (M) x 4 (N)
 constexpr int WARPS_N = 4;
-constexpr int WARP_TILE_M = BM / WARPS_M;  // 64
-constexpr int WARP_TILE_N = BN / WARPS_N;  // 32
+constexpr int WARP_TILE_M = BM / WARPS_M;      // 64
+constexpr int WARP_TILE_N = BN / WARPS_N;      // 32
 constexpr int FRAGS_M = WARP_TILE_M / WMMA_M;  // 4
 constexpr int FRAGS_N = WARP_TILE_N / WMMA_N;  // 2
 
@@ -108,8 +109,8 @@ static_assert(WARPS_M * WARPS_N * 32 == TILE_THREADS, "warp layout must match bl
 static_assert(A_LD % 8 == 0 && B_LD % 8 == 0, "WMMA ldm must be a multiple of 8 bf16");
 
 // A tile: BM x BK = 4096 bf16 = 512 chunks of 8; B tile: BK x BN = 4096 bf16 = 512 chunks.
-constexpr int A_CHUNKS_PER_ROW = BK / 8;   // 4
-constexpr int B_CHUNKS_PER_ROW = BN / 8;   // 16
+constexpr int A_CHUNKS_PER_ROW = BK / 8;                         // 4
+constexpr int B_CHUNKS_PER_ROW = BN / 8;                         // 16
 constexpr int CHUNKS_PER_THREAD = (BM * BK / 8) / TILE_THREADS;  // 2
 static_assert(CHUNKS_PER_THREAD * TILE_THREADS == BM * BK / 8, "A tile must divide evenly");
 static_assert(CHUNKS_PER_THREAD * TILE_THREADS == BK * BN / 8, "B tile must divide evenly");
@@ -174,8 +175,8 @@ __device__ __forceinline__ void load_tile_async(__nv_bfloat16 (*As)[A_LD],
 
 // One BK=32 step: two k-slices of 16, FRAGS_M x FRAGS_N mma per slice per warp.
 __device__ __forceinline__ void compute_tile(FragC (&acc)[FRAGS_M][FRAGS_N],
-                                             __nv_bfloat16 (*As)[A_LD],
-                                             __nv_bfloat16 (*Bs)[B_LD], int warp_m, int warp_n) {
+                                             __nv_bfloat16 (*As)[A_LD], __nv_bfloat16 (*Bs)[B_LD],
+                                             int warp_m, int warp_n) {
 #pragma unroll
     for (int kk = 0; kk < BK; kk += WMMA_K) {
         FragA a_frag[FRAGS_M];
@@ -224,11 +225,11 @@ __device__ __forceinline__ void store_tile(FragC (&acc)[FRAGS_M][FRAGS_N], float
 // ---------------------------------------------------------------------------------------
 // Variant 1: shared-memory staged 128x128x32 tile, single buffer.
 // ---------------------------------------------------------------------------------------
-__global__ void __launch_bounds__(TILE_THREADS) hgemm_v1_kernel(
-    const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B,
-    __nv_bfloat16* __restrict__ C, int M, int N, int K) {
-    __shared__ __align__(32) __nv_bfloat16 As[BM][A_LD];   // 10,240 B
-    __shared__ __align__(32) __nv_bfloat16 Bs[BK][B_LD];   //  8,704 B
+__global__ void __launch_bounds__(TILE_THREADS)
+    hgemm_v1_kernel(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B,
+                    __nv_bfloat16* __restrict__ C, int M, int N, int K) {
+    __shared__ __align__(32) __nv_bfloat16 As[BM][A_LD];                    // 10,240 B
+    __shared__ __align__(32) __nv_bfloat16 Bs[BK][B_LD];                    //  8,704 B
     __shared__ __align__(32) float Cs[TILE_THREADS / 32][WMMA_M * WMMA_N];  // 8,192 B
 
     const int warp_id = threadIdx.x >> 5;
@@ -259,12 +260,13 @@ __global__ void __launch_bounds__(TILE_THREADS) hgemm_v1_kernel(
 // Variant 2: two-stage cp.async pipeline. Global->shared copies for tile k+1 are in flight
 // while the tensor cores chew on tile k.
 // ---------------------------------------------------------------------------------------
-__global__ void __launch_bounds__(TILE_THREADS) hgemm_v2_kernel(
-    const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B,
-    __nv_bfloat16* __restrict__ C, int M, int N, int K) {
+__global__ void __launch_bounds__(TILE_THREADS)
+    hgemm_v2_kernel(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B,
+                    __nv_bfloat16* __restrict__ C, int M, int N, int K) {
     __shared__ __align__(32) __nv_bfloat16 As[2][BM][A_LD];  // 20,480 B
     __shared__ __align__(32) __nv_bfloat16 Bs[2][BK][B_LD];  // 17,408 B
-    __shared__ __align__(32) float Cs[TILE_THREADS / 32][WMMA_M * WMMA_N];  // 8,192 B  (46,080 B total)
+    __shared__ __align__(
+        32) float Cs[TILE_THREADS / 32][WMMA_M * WMMA_N];  // 8,192 B  (46,080 B total)
 
     const int warp_id = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
@@ -305,7 +307,9 @@ __global__ void __launch_bounds__(TILE_THREADS) hgemm_v2_kernel(
 
 }  // namespace
 
-int hgemm_num_variants() { return 3; }
+int hgemm_num_variants() {
+    return 3;
+}
 
 void hgemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N,
                 int K, int variant, cudaStream_t stream) {

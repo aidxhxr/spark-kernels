@@ -15,7 +15,9 @@ using namespace spark::bench;
 
 namespace {
 
-float silu_host(float x) { return x / (1.0f + std::exp(-x)); }
+float silu_host(float x) {
+    return x / (1.0f + std::exp(-x));
+}
 
 // |got - ref| <= atol + rtol * |ref| for every element.
 bool within_tol(const std::vector<float>& got, const std::vector<float>& ref, double atol,
@@ -36,8 +38,7 @@ struct Traits<float> {
     static float from_host(float v) { return v; }
     static double atol() { return 1e-5; }
     static double rtol() { return 1e-5; }
-    static void launch(const float* g, const float* u, float* o, int64_t n, int v,
-                       cudaStream_t s) {
+    static void launch(const float* g, const float* u, float* o, int64_t n, int v, cudaStream_t s) {
         spark::swiglu_f32(g, u, o, n, v, s);
     }
 };
@@ -48,8 +49,8 @@ struct Traits<__nv_bfloat16> {
     static __nv_bfloat16 from_host(float v) { return __float2bfloat16(v); }
     static double atol() { return 2e-2; }
     static double rtol() { return 2e-2; }
-    static void launch(const __nv_bfloat16* g, const __nv_bfloat16* u, __nv_bfloat16* o,
-                       int64_t n, int v, cudaStream_t s) {
+    static void launch(const __nv_bfloat16* g, const __nv_bfloat16* u, __nv_bfloat16* o, int64_t n,
+                       int v, cudaStream_t s) {
         spark::swiglu_bf16(g, u, o, n, v, s);
     }
 };
@@ -98,8 +99,8 @@ bool run_shape(int64_t n, const std::string& shape, int iters, cudaStream_t stre
         const bool ok = within_tol(got, ref, Tr::atol(), Tr::rtol());
         all_ok = all_ok && ok;
 
-        const Timing t = time_kernel([&] { Tr::launch(d_gate, d_up, d_out, n, v, stream); },
-                                     stream, 10, iters);
+        const Timing t =
+            time_kernel([&] { Tr::launch(d_gate, d_up, d_out, n, v, stream); }, stream, 10, iters);
         if (v == 0) v0_ms = t.median_ms;
 
         Row r;

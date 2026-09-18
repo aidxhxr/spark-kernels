@@ -22,14 +22,14 @@
 
 namespace {
 
-#define CUBLAS_CHECK(expr)                                                                 \
-    do {                                                                                   \
-        cublasStatus_t _st = (expr);                                                       \
-        if (_st != CUBLAS_STATUS_SUCCESS) {                                                \
-            std::fprintf(stderr, "cuBLAS error %d at %s:%d\n", static_cast<int>(_st),      \
-                         __FILE__, __LINE__);                                              \
-            std::exit(1);                                                                  \
-        }                                                                                  \
+#define CUBLAS_CHECK(expr)                                                                      \
+    do {                                                                                        \
+        cublasStatus_t _st = (expr);                                                            \
+        if (_st != CUBLAS_STATUS_SUCCESS) {                                                     \
+            std::fprintf(stderr, "cuBLAS error %d at %s:%d\n", static_cast<int>(_st), __FILE__, \
+                         __LINE__);                                                             \
+            std::exit(1);                                                                       \
+        }                                                                                       \
     } while (0)
 
 struct Shape {
@@ -38,10 +38,11 @@ struct Shape {
 
 // Row-major C = A * B via column-major cuBLAS: treat the row-major matrices as their
 // column-major transposes, so C^T[N,M] = B^T[N,K] * A^T[K,M].
-void cublas_sgemm_rowmajor(cublasHandle_t h, const float* A, const float* B, float* C, int M,
-                           int N, int K) {
+void cublas_sgemm_rowmajor(cublasHandle_t h, const float* A, const float* B, float* C, int M, int N,
+                           int K) {
     const float alpha = 1.0f, beta = 0.0f;
-    CUBLAS_CHECK(cublasSgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, B, N, A, K, &beta, C, N));
+    CUBLAS_CHECK(
+        cublasSgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, B, N, A, K, &beta, C, N));
 }
 
 double tflops_of(const Shape& s, double ms) {
@@ -65,8 +66,8 @@ int main(int argc, char** argv) {
         const int m = args.geti("m", 1024);
         shapes.push_back({m, args.geti("n", m), args.geti("k", m)});
     } else {
-        shapes = {{512, 512, 512},      {1024, 1024, 1024},  {2048, 2048, 2048},
-                  {4096, 4096, 4096},   {4096, 4096, 11008}, {4096, 11008, 4096}};
+        shapes = {{512, 512, 512},    {1024, 1024, 1024},  {2048, 2048, 2048},
+                  {4096, 4096, 4096}, {4096, 4096, 11008}, {4096, 11008, 4096}};
     }
 
     cudaStream_t stream;
@@ -100,11 +101,10 @@ int main(int argc, char** argv) {
         // ---- cuBLAS reference (result + timing)
         cublas_sgemm_rowmajor(handle, dA, dB, dRef, s.M, s.N, s.K);
         SPARK_CUDA_CHECK(cudaStreamSynchronize(stream));
-        SPARK_CUDA_CHECK(
-            cudaMemcpy(hRef.data(), dRef, nC * sizeof(float), cudaMemcpyDeviceToHost));
-        const Timing tref = time_kernel(
-            [&] { cublas_sgemm_rowmajor(handle, dA, dB, dRef, s.M, s.N, s.K); }, stream, warmup,
-            iters);
+        SPARK_CUDA_CHECK(cudaMemcpy(hRef.data(), dRef, nC * sizeof(float), cudaMemcpyDeviceToHost));
+        const Timing tref =
+            time_kernel([&] { cublas_sgemm_rowmajor(handle, dA, dB, dRef, s.M, s.N, s.K); }, stream,
+                        warmup, iters);
 
         const std::string shape_str =
             std::to_string(s.M) + "x" + std::to_string(s.N) + "x" + std::to_string(s.K);
@@ -139,8 +139,7 @@ int main(int argc, char** argv) {
             const bool ok = err.max_abs <= tol && std::isfinite(err.max_abs);
 
             const Timing t = time_kernel(
-                [&] { spark::sgemm(dA, dB, dC, s.M, s.N, s.K, v, stream); }, stream, warmup,
-                iters);
+                [&] { spark::sgemm(dA, dB, dC, s.M, s.N, s.K, v, stream); }, stream, warmup, iters);
 
             Row r;
             r.kernel = "sgemm";

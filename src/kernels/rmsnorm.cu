@@ -273,7 +273,8 @@ void rmsnorm_dispatch(const T* x, const T* w, T* out, int rows, int cols, float 
         }
         case 3: {
             constexpr int kBlock = 256;
-            rmsnorm_block_kernel<T, kBlock><<<rows, kBlock, 0, stream>>>(x, w, out, rows, cols, eps);
+            rmsnorm_block_kernel<T, kBlock>
+                <<<rows, kBlock, 0, stream>>>(x, w, out, rows, cols, eps);
             break;
         }
         default:
@@ -284,7 +285,9 @@ void rmsnorm_dispatch(const T* x, const T* w, T* out, int rows, int cols, float 
 
 }  // namespace
 
-int rmsnorm_num_variants() { return 4; }
+int rmsnorm_num_variants() {
+    return 4;
+}
 
 void rmsnorm_f32(const float* x, const float* w, float* out, int rows, int cols, float eps,
                  int variant, cudaStream_t stream) {

@@ -85,9 +85,9 @@ struct Row {
     int variant = -1;
     std::string shape;
     double median_ms = 0;
-    double gbps = 0;      // achieved memory bandwidth, if meaningful
-    double tflops = 0;    // achieved compute, if meaningful
-    double ref_ms = 0;    // reference (cuBLAS / naive) time for the same shape, 0 if none
+    double gbps = 0;    // achieved memory bandwidth, if meaningful
+    double tflops = 0;  // achieved compute, if meaningful
+    double ref_ms = 0;  // reference (cuBLAS / naive) time for the same shape, 0 if none
     double max_abs_err = 0;
     double max_rel_err = 0;
     bool ok = true;
@@ -132,7 +132,9 @@ struct Args {
             if (p.first == k) return p.second;
         return def;
     }
-    int geti(const std::string& k, int def) const { return std::atoi(get(k, std::to_string(def)).c_str()); }
+    int geti(const std::string& k, int def) const {
+        return std::atoi(get(k, std::to_string(def)).c_str());
+    }
     bool has(const std::string& k) const {
         for (auto& p : kv)
             if (p.first == k) return true;

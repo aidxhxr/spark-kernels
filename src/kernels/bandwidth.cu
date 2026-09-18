@@ -16,8 +16,7 @@ namespace {
 
 constexpr int kBlock = 256;
 
-__global__ void copy_scalar_kernel(const float* __restrict__ x, float* __restrict__ y,
-                                   int64_t n) {
+__global__ void copy_scalar_kernel(const float* __restrict__ x, float* __restrict__ y, int64_t n) {
     const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) y[i] = x[i];
 }
@@ -28,8 +27,8 @@ __global__ void copy_float4_kernel(const float4* __restrict__ x, float4* __restr
     if (i < n4) y[i] = x[i];
 }
 
-__global__ void copy_float4_gridstride_kernel(const float4* __restrict__ x,
-                                              float4* __restrict__ y, int64_t n4) {
+__global__ void copy_float4_gridstride_kernel(const float4* __restrict__ x, float4* __restrict__ y,
+                                              int64_t n4) {
     const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
     for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n4;
          i += stride) {
@@ -38,8 +37,8 @@ __global__ void copy_float4_gridstride_kernel(const float4* __restrict__ x,
 }
 
 // Scalar remainder for the vectorized variants (n % 4 != 0). At most 3 elements, one block.
-__global__ void copy_tail_kernel(const float* __restrict__ x, float* __restrict__ y,
-                                 int64_t start, int64_t n) {
+__global__ void copy_tail_kernel(const float* __restrict__ x, float* __restrict__ y, int64_t start,
+                                 int64_t n) {
     const int64_t i = start + threadIdx.x;
     if (i < n) y[i] = x[i];
 }
@@ -61,11 +60,15 @@ unsigned grid_for(int64_t work_items, int block) {
     return static_cast<unsigned>(blocks);
 }
 
-bool aligned16(const void* p) { return (reinterpret_cast<uintptr_t>(p) % 16) == 0; }
+bool aligned16(const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) % 16) == 0;
+}
 
 }  // namespace
 
-int bandwidth_num_variants() { return 3; }
+int bandwidth_num_variants() {
+    return 3;
+}
 
 void bandwidth_copy(const float* x, float* y, int64_t n, int variant, cudaStream_t stream) {
     SPARK_REQUIRE(x != nullptr && y != nullptr, "bandwidth_copy: null pointer");

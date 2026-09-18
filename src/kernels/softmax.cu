@@ -1,5 +1,5 @@
-// Row-wise softmax: naive three-pass -> warp-per-row online softmax -> block-per-row online softmax.
-// See docs/design/softmax.md for the optimization story.
+// Row-wise softmax: naive three-pass -> warp-per-row online softmax -> block-per-row online
+// softmax. See docs/design/softmax.md for the optimization story.
 //
 // All variants compute in fp32 regardless of the storage type T (float or __nv_bfloat16).
 
@@ -289,8 +289,7 @@ void softmax_impl(const T* x, T* out, int rows, int cols, int variant, cudaStrea
 
 }  // namespace
 
-void softmax_f32(const float* x, float* out, int rows, int cols, int variant,
-                 cudaStream_t stream) {
+void softmax_f32(const float* x, float* out, int rows, int cols, int variant, cudaStream_t stream) {
     softmax_impl<float>(x, out, rows, cols, variant, stream);
 }
 
@@ -299,6 +298,8 @@ void softmax_bf16(const __nv_bfloat16* x, __nv_bfloat16* out, int rows, int cols
     softmax_impl<__nv_bfloat16>(x, out, rows, cols, variant, stream);
 }
 
-int softmax_num_variants() { return kNumVariants; }
+int softmax_num_variants() {
+    return kNumVariants;
+}
 
 }  // namespace spark

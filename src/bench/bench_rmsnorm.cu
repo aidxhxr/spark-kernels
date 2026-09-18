@@ -97,7 +97,8 @@ bool bench_rmsnorm_dtype(int rows, int cols, int iters, cudaStream_t stream) {
         cudaMemcpy(dw, hw.data(), static_cast<size_t>(cols) * sizeof(T), cudaMemcpyHostToDevice));
 
     // Traffic model: read x once, read w once, write out once.
-    const double bytes = static_cast<double>(n) * sizeof(T) * 2.0 + static_cast<double>(cols) * sizeof(T);
+    const double bytes =
+        static_cast<double>(n) * sizeof(T) * 2.0 + static_cast<double>(cols) * sizeof(T);
 
     bool all_ok = true;
     double naive_ms = 0.0;
@@ -110,8 +111,8 @@ bool bench_rmsnorm_dtype(int rows, int cols, int iters, cudaStream_t stream) {
         for (size_t i = 0; i < n; ++i) got[i] = HD::to_f32(hout[i]);
         const ErrorStats err = compare(got.data(), ref.data(), n);
 
-        const Timing t = time_kernel(
-            [&]() { HD::run(dx, dw, dout, rows, cols, variant, stream); }, stream, 10, iters);
+        const Timing t = time_kernel([&]() { HD::run(dx, dw, dout, rows, cols, variant, stream); },
+                                     stream, 10, iters);
         if (variant == 0) naive_ms = t.median_ms;
 
         Row row;
@@ -192,7 +193,8 @@ bool bench_add_rmsnorm(int rows, int cols, int iters, cudaStream_t stream) {
         [&]() { add_rmsnorm_bf16(dx, dr, dw, dout, rows, cols, kEps, stream); }, stream, 10, iters);
 
     // Traffic model: read x, read resid, write resid, write out, read w.
-    const double bytes = static_cast<double>(n) * sizeof(T) * 4.0 + static_cast<double>(cols) * sizeof(T);
+    const double bytes =
+        static_cast<double>(n) * sizeof(T) * 4.0 + static_cast<double>(cols) * sizeof(T);
 
     Row row;
     row.kernel = "add_rmsnorm";

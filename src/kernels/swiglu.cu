@@ -17,7 +17,9 @@ namespace {
 
 constexpr int kBlock = 256;
 
-__device__ __forceinline__ float silu_f(float x) { return x / (1.0f + __expf(-x)); }
+__device__ __forceinline__ float silu_f(float x) {
+    return x / (1.0f + __expf(-x));
+}
 
 template <typename T>
 __global__ void swiglu_scalar_kernel(const T* __restrict__ gate, const T* __restrict__ up,
@@ -31,9 +33,8 @@ __global__ void swiglu_scalar_kernel(const T* __restrict__ gate, const T* __rest
 }
 
 // f32: 4 elements per thread via f32x4 (one 128-bit load per operand).
-__global__ void swiglu_vec_f32_kernel(const float* __restrict__ gate,
-                                      const float* __restrict__ up, float* __restrict__ out,
-                                      int64_t n) {
+__global__ void swiglu_vec_f32_kernel(const float* __restrict__ gate, const float* __restrict__ up,
+                                      float* __restrict__ out, int64_t n) {
     constexpr int VEC = 4;
     const int64_t n_vec = n / VEC;
     const int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -107,7 +108,9 @@ int num_sms() {
     return sms;
 }
 
-bool aligned16(const void* p) { return (reinterpret_cast<uintptr_t>(p) % 16) == 0; }
+bool aligned16(const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) % 16) == 0;
+}
 
 // Grid for the grid-stride vector kernels: enough blocks to fill the machine several times
 // over (8 blocks x 256 threads per SM), but never more blocks than there is vector work.
@@ -120,8 +123,7 @@ unsigned vec_grid(int64_t n_vec) {
 }
 
 template <typename T>
-void swiglu_impl(const T* gate, const T* up, T* out, int64_t n, int variant,
-                 cudaStream_t stream) {
+void swiglu_impl(const T* gate, const T* up, T* out, int64_t n, int variant, cudaStream_t stream) {
     SPARK_REQUIRE(gate != nullptr && up != nullptr && out != nullptr, "swiglu: null pointer");
     SPARK_REQUIRE(n >= 0, "swiglu: n must be >= 0");
     SPARK_REQUIRE(variant >= 0 && variant < swiglu_num_variants(), "swiglu: unknown variant");
@@ -130,8 +132,8 @@ void swiglu_impl(const T* gate, const T* up, T* out, int64_t n, int variant,
     if (variant == 0) {
         const int64_t blocks = cdiv64(n, kBlock);
         SPARK_REQUIRE(blocks < (int64_t{1} << 31), "swiglu: n too large for variant 0");
-        swiglu_scalar_kernel<T><<<static_cast<unsigned>(blocks), kBlock, 0, stream>>>(gate, up,
-                                                                                      out, n);
+        swiglu_scalar_kernel<T>
+            <<<static_cast<unsigned>(blocks), kBlock, 0, stream>>>(gate, up, out, n);
         SPARK_CHECK_LAUNCH();
         return;
     }
@@ -141,29 +143,30 @@ void swiglu_impl(const T* gate, const T* up, T* out, int64_t n, int variant,
     constexpr int VEC = 16 / static_cast<int>(sizeof(T));
     const unsigned grid = vec_grid(n / VEC);
     if constexpr (sizeof(T) == 4) {
-        swiglu_vec_f32_kernel<<<grid, kBlock, 0, stream>>>(
-            reinterpret_cast<const float*>(gate), reinterpret_cast<const float*>(up),
-            reinterpret_cast<float*>(out), n);
+        swiglu_vec_f32_kernel<<<grid, kBlock, 0, stream>>>(reinterpret_cast<const float*>(gate),
+                                                           reinterpret_cast<const float*>(up),
+                                                           reinterpret_cast<float*>(out), n);
     } else {
         swiglu_vec_bf16_kernel<<<grid, kBlock, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(gate),
-            reinterpret_cast<const __nv_bfloat16*>(up), reinterpret_cast<__nv_bfloat16*>(out),
-            n);
+            reinterpret_cast<const __nv_bfloat16*>(up), reinterpret_cast<__nv_bfloat16*>(out), n);
     }
     SPARK_CHECK_LAUNCH();
 }
 
 }  // namespace
 
-int swiglu_num_variants() { return 2; }
+int swiglu_num_variants() {
+    return 2;
+}
 
 void swiglu_f32(const float* gate, const float* up, float* out, int64_t n, int variant,
                 cudaStream_t stream) {
     swiglu_impl<float>(gate, up, out, n, variant, stream);
 }
 
-void swiglu_bf16(const __nv_bfloat16* gate, const __nv_bfloat16* up, __nv_bfloat16* out,
-                 int64_t n, int variant, cudaStream_t stream) {
+void swiglu_bf16(const __nv_bfloat16* gate, const __nv_bfloat16* up, __nv_bfloat16* out, int64_t n,
+                 int variant, cudaStream_t stream) {
     swiglu_impl<__nv_bfloat16>(gate, up, out, n, variant, stream);
 }
 
