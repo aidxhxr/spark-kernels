@@ -51,6 +51,15 @@ def fmt(x: float, nd=3) -> str:
     return f"{x:.{nd}f}" if x else "—"
 
 
+def vs_ref(kernel: str, r: dict) -> str:
+    """ref_ms is cuBLAS for the GEMMs (shown as % of cuBLAS throughput) and the naive variant
+    or cudaMemcpy for everything else (shown as a speedup)."""
+    ref_ms, ms = r.get("ref_ms", 0), r["median_ms"]
+    if ref_ms <= 0 or ms <= 0:
+        return "—"
+    return pct(ref_ms / ms) if is_compute_bound_kernel(kernel) else f"{ref_ms / ms:.2f}×"
+
+
 def peak_for(kernel: str, dtype: str) -> tuple[str, float]:
     if is_compute_bound_kernel(kernel):
         if kernel == "hgemm":
@@ -85,8 +94,7 @@ def table_for(kernel: str, rows: list[dict], torch_rows: dict) -> str:
             pct(val / peak if peak else 0),
         ]
         if has_ref:
-            ref_ms = r.get("ref_ms", 0)
-            cells.append(pct(ref_ms / r["median_ms"]) if ref_ms > 0 and r["median_ms"] > 0 else "—")
+            cells.append(vs_ref(kernel, r))
         if has_torch:
             t = torch_rows.get((kernel, r["dtype"], r["shape"]))
             # torch comparison is for the fastest variant only
@@ -102,7 +110,7 @@ def table_for(kernel: str, rows: list[dict], torch_rows: dict) -> str:
 def headline(by_kernel: dict[str, list[dict]], torch_rows: dict) -> str:
     out = [
         "| kernel | dtype | shape | best variant | median ms | achieved | % of peak "
-        "| vs cuBLAS | vs torch |",
+        "| vs cuBLAS / naive | vs torch |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for kernel in KERNEL_ORDER:
@@ -118,13 +126,12 @@ def headline(by_kernel: dict[str, list[dict]], torch_rows: dict) -> str:
             cands = [r for r in drows if shape_size(kernel, r["shape"]) == biggest]
             best = min(cands, key=lambda r: r["median_ms"])
             val = best.get("tflops", 0) if unit == "TFLOPS" else best.get("gbps", 0)
-            ref_ms = best.get("ref_ms", 0)
             t = torch_rows.get((kernel, dtype, best["shape"]))
             out.append(
                 "| {k} | {d} | {s} | v{v} | {ms:.4f} | {val:.1f} {u} | {p} | {c} | {t} |".format(
                     k=kernel, d=dtype, s=best["shape"], v=best["variant"], ms=best["median_ms"],
                     val=val, u=unit, p=pct(val / peak if peak else 0),
-                    c=pct(ref_ms / best["median_ms"]) if ref_ms > 0 else "—",
+                    c=vs_ref(kernel, best),
                     t=f"{t['speedup']:.2f}×" if t else "—",
                 )
             )
