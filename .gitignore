@@ -1,0 +1,29 @@
+# private research / planning notes (kept out of the public repo)
+context/
+
+# build artifacts
+build/
+*.o
+*.so
+*.a
+*.ncu-rep
+*.nsys-rep
+*.egg-info/
+dist/
+.eggs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# benchmark outputs are regenerated on the Spark; keep the folder, not the data
+results/*.json
+results/*.png
+results/*.csv
+!results/.gitkeep
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
