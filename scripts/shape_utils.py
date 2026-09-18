@@ -110,12 +110,5 @@ def arithmetic_intensity(kernel: str, dtype: str, shape: str) -> float:
     return flops(kernel, dims) / b if b > 0 else 0.0
 
 
-def compute_peak_tflops(kernel: str, dtype: str) -> float:
-    if kernel.lower() == "hgemm" or dtype in ("bf16", "bfloat16"):
-        if kernel.lower() in ("hgemm",):
-            return PEAKS["bf16_tflops"]
-    return PEAKS["fp32_tflops"]
-
-
 def is_compute_bound_kernel(kernel: str) -> bool:
     return kernel.lower() in ("sgemm", "hgemm", "gemm")

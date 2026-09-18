@@ -60,7 +60,7 @@ def vs_ref(kernel: str, r: dict) -> str:
     return pct(ref_ms / ms) if is_compute_bound_kernel(kernel) else f"{ref_ms / ms:.2f}×"
 
 
-def peak_for(kernel: str, dtype: str) -> tuple[str, float]:
+def peak_for(kernel: str) -> tuple[str, float]:
     if is_compute_bound_kernel(kernel):
         if kernel == "hgemm":
             return "TFLOPS", PEAKS["bf16_tflops"]
@@ -69,7 +69,7 @@ def peak_for(kernel: str, dtype: str) -> tuple[str, float]:
 
 
 def table_for(kernel: str, rows: list[dict], torch_rows: dict) -> str:
-    unit, peak = peak_for(kernel, rows[0].get("dtype", "f32"))
+    unit, peak = peak_for(kernel)
     has_ref = any(r.get("ref_ms", 0) > 0 for r in rows)
     has_torch = any((kernel, r["dtype"], r["shape"]) in torch_rows for r in rows)
     ref_label = "% of cuBLAS" if is_compute_bound_kernel(kernel) else "speedup vs ref"
@@ -117,7 +117,7 @@ def headline(by_kernel: dict[str, list[dict]], torch_rows: dict) -> str:
         rows = by_kernel.get(kernel)
         if not rows:
             continue
-        unit, peak = peak_for(kernel, rows[0]["dtype"])
+        unit, peak = peak_for(kernel)
         for dtype in sorted({r["dtype"] for r in rows}):
             drows = [r for r in rows if r["dtype"] == dtype and r.get("ok", True)]
             if not drows:
