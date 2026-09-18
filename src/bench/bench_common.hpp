@@ -36,9 +36,9 @@ inline Config& config() {
     return c;
 }
 
-// A discrete board like the RTX 5090 idles at low clocks and needs a few hundred ms of load
-// to reach its boost state (the GB10 ramps too, just less). Spin the first kernel of the
-// process for kRampMs once, so the first row of a results file is not measured cold.
+// A discrete board like the RTX 5090 idles at low clocks and takes a while under load to
+// reach its boost state. Spin the first kernel of the process for kRampMs once, so the first
+// row of a results file is not measured cold. Harmless on the GB10.
 constexpr int kRampMs = 300;
 inline void ramp_clocks(const std::function<void()>& fn, cudaStream_t stream) {
     static bool done = false;
