@@ -1,0 +1,213 @@
+// PyTorch bindings for spark-kernels.
+//
+// Every op validates on the host and dispatches to the launchers declared in
+// include/spark/kernels.h on the current PyTorch CUDA stream. Shape/dtype problems raise
+// ValueError in Python (pybind11 translates std::invalid_argument); CUDA failures raise
+// RuntimeError.
+//
+// `variant = -1` means "the fastest variant", i.e. num_variants() - 1.
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cuda_bf16.h>
+#include <torch/extension.h>
+
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+
+#include "spark/kernels.h"
+
+namespace {
+
+using at::Tensor;
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+void check_cuda_contig(const Tensor& t, const char* name) {
+    TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor");
+    TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+    TORCH_CHECK(t.numel() > 0, name, " must be non-empty");
+}
+
+void check_float_or_bf16(const Tensor& t, const char* name) {
+    TORCH_CHECK(t.scalar_type() == at::kFloat || t.scalar_type() == at::kBFloat16, name,
+                " must be float32 or bfloat16, got ", t.scalar_type());
+}
+
+int resolve_variant(int variant, int num) {
+    if (variant < 0) return num - 1;
+    TORCH_CHECK(variant < num, "variant ", variant, " out of range [0, ", num, ")");
+    return variant;
+}
+
+// Row ops treat the last dim as the row; all leading dims are flattened.
+struct RowShape {
+    int rows;
+    int cols;
+};
+RowShape row_shape(const Tensor& t) {
+    TORCH_CHECK(t.dim() >= 1, "expected at least 1 dimension");
+    const int64_t cols = t.size(-1);
+    const int64_t rows = t.numel() / cols;
+    TORCH_CHECK(rows <= INT32_MAX && cols <= INT32_MAX, "tensor too large for int32 indexing");
+    return {static_cast<int>(rows), static_cast<int>(cols)};
+}
+
+const __nv_bfloat16* bf16_ptr(const Tensor& t) {
+    return reinterpret_cast<const __nv_bfloat16*>(t.data_ptr<at::BFloat16>());
+}
+__nv_bfloat16* bf16_ptr_mut(Tensor& t) {
+    return reinterpret_cast<__nv_bfloat16*>(t.data_ptr<at::BFloat16>());
+}
+
+cudaStream_t current_stream(const Tensor& t) {
+    return at::cuda::getCurrentCUDAStream(t.device().index()).stream();
+}
+
+// ---------------------------------------------------------------------------
+// Ops
+// ---------------------------------------------------------------------------
+Tensor rmsnorm(const Tensor& x, const Tensor& w, double eps, int variant) {
+    check_cuda_contig(x, "x");
+    check_cuda_contig(w, "w");
+    check_float_or_bf16(x, "x");
+    TORCH_CHECK(w.scalar_type() == x.scalar_type(), "w must have the same dtype as x");
+    const RowShape s = row_shape(x);
+    TORCH_CHECK(w.dim() == 1 && w.size(0) == s.cols, "w must have shape [cols] = [", s.cols, "]");
+    const c10::cuda::CUDAGuard guard(x.device());
+    Tensor out = at::empty_like(x);
+    const int v = resolve_variant(variant, spark::rmsnorm_num_variants());
+    cudaStream_t stream = current_stream(x);
+    if (x.scalar_type() == at::kFloat) {
+        spark::rmsnorm_f32(x.data_ptr<float>(), w.data_ptr<float>(), out.data_ptr<float>(), s.rows,
+                           s.cols, static_cast<float>(eps), v, stream);
+    } else {
+        spark::rmsnorm_bf16(bf16_ptr(x), bf16_ptr(w), bf16_ptr_mut(out), s.rows, s.cols,
+                            static_cast<float>(eps), v, stream);
+    }
+    return out;
+}
+
+// resid += x; out = rmsnorm(resid) * w. resid is modified in place. bf16 only.
+Tensor add_rmsnorm_(const Tensor& x, Tensor resid, const Tensor& w, double eps) {
+    check_cuda_contig(x, "x");
+    check_cuda_contig(resid, "resid");
+    check_cuda_contig(w, "w");
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16, "add_rmsnorm_ supports bfloat16 only");
+    TORCH_CHECK(resid.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16,
+                "resid and w must be bfloat16");
+    TORCH_CHECK(resid.sizes() == x.sizes(), "resid must have the same shape as x");
+    const RowShape s = row_shape(x);
+    TORCH_CHECK(w.dim() == 1 && w.size(0) == s.cols, "w must have shape [cols] = [", s.cols, "]");
+    const c10::cuda::CUDAGuard guard(x.device());
+    Tensor out = at::empty_like(x);
+    spark::add_rmsnorm_bf16(bf16_ptr(x), bf16_ptr_mut(resid), bf16_ptr(w), bf16_ptr_mut(out),
+                            s.rows, s.cols, static_cast<float>(eps), current_stream(x));
+    return out;
+}
+
+Tensor swiglu(const Tensor& gate, const Tensor& up, int variant) {
+    check_cuda_contig(gate, "gate");
+    check_cuda_contig(up, "up");
+    check_float_or_bf16(gate, "gate");
+    TORCH_CHECK(up.scalar_type() == gate.scalar_type(), "up must have the same dtype as gate");
+    TORCH_CHECK(up.sizes() == gate.sizes(), "gate and up must have the same shape");
+    const c10::cuda::CUDAGuard guard(gate.device());
+    Tensor out = at::empty_like(gate);
+    const int v = resolve_variant(variant, spark::swiglu_num_variants());
+    cudaStream_t stream = current_stream(gate);
+    const int64_t n = gate.numel();
+    if (gate.scalar_type() == at::kFloat) {
+        spark::swiglu_f32(gate.data_ptr<float>(), up.data_ptr<float>(), out.data_ptr<float>(), n,
+                          v, stream);
+    } else {
+        spark::swiglu_bf16(bf16_ptr(gate), bf16_ptr(up), bf16_ptr_mut(out), n, v, stream);
+    }
+    return out;
+}
+
+Tensor softmax(const Tensor& x, int variant) {
+    check_cuda_contig(x, "x");
+    check_float_or_bf16(x, "x");
+    const RowShape s = row_shape(x);
+    const c10::cuda::CUDAGuard guard(x.device());
+    Tensor out = at::empty_like(x);
+    const int v = resolve_variant(variant, spark::softmax_num_variants());
+    cudaStream_t stream = current_stream(x);
+    if (x.scalar_type() == at::kFloat) {
+        spark::softmax_f32(x.data_ptr<float>(), out.data_ptr<float>(), s.rows, s.cols, v, stream);
+    } else {
+        spark::softmax_bf16(bf16_ptr(x), bf16_ptr_mut(out), s.rows, s.cols, v, stream);
+    }
+    return out;
+}
+
+struct GemmShape {
+    int M, N, K;
+};
+GemmShape gemm_shape(const Tensor& a, const Tensor& b) {
+    TORCH_CHECK(a.dim() == 2 && b.dim() == 2, "gemm expects 2-D tensors");
+    TORCH_CHECK(a.size(1) == b.size(0), "inner dimensions mismatch: a is ", a.size(0), "x",
+                a.size(1), ", b is ", b.size(0), "x", b.size(1));
+    TORCH_CHECK(a.size(0) <= INT32_MAX && b.size(1) <= INT32_MAX && a.size(1) <= INT32_MAX,
+                "gemm dims too large for int32");
+    return {static_cast<int>(a.size(0)), static_cast<int>(b.size(1)), static_cast<int>(a.size(1))};
+}
+
+Tensor sgemm(const Tensor& a, const Tensor& b, int variant) {
+    check_cuda_contig(a, "a");
+    check_cuda_contig(b, "b");
+    TORCH_CHECK(a.scalar_type() == at::kFloat && b.scalar_type() == at::kFloat,
+                "sgemm expects float32 inputs");
+    const GemmShape s = gemm_shape(a, b);
+    const c10::cuda::CUDAGuard guard(a.device());
+    Tensor c = at::empty({s.M, s.N}, a.options());
+    const int v = resolve_variant(variant, spark::sgemm_num_variants());
+    spark::sgemm(a.data_ptr<float>(), b.data_ptr<float>(), c.data_ptr<float>(), s.M, s.N, s.K, v,
+                 current_stream(a));
+    return c;
+}
+
+Tensor hgemm(const Tensor& a, const Tensor& b, int variant) {
+    check_cuda_contig(a, "a");
+    check_cuda_contig(b, "b");
+    TORCH_CHECK(a.scalar_type() == at::kBFloat16 && b.scalar_type() == at::kBFloat16,
+                "hgemm expects bfloat16 inputs");
+    const GemmShape s = gemm_shape(a, b);
+    const c10::cuda::CUDAGuard guard(a.device());
+    Tensor c = at::empty({s.M, s.N}, a.options());
+    const int v = resolve_variant(variant, spark::hgemm_num_variants());
+    spark::hgemm_bf16(bf16_ptr(a), bf16_ptr(b), bf16_ptr_mut(c), s.M, s.N, s.K, v,
+                      current_stream(a));
+    return c;
+}
+
+int num_variants(const std::string& name) {
+    if (name == "rmsnorm") return spark::rmsnorm_num_variants();
+    if (name == "swiglu") return spark::swiglu_num_variants();
+    if (name == "softmax") return spark::softmax_num_variants();
+    if (name == "sgemm") return spark::sgemm_num_variants();
+    if (name == "hgemm") return spark::hgemm_num_variants();
+    if (name == "bandwidth") return spark::bandwidth_num_variants();
+    throw std::invalid_argument("unknown kernel: " + name);
+}
+
+}  // namespace
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.doc() = "spark-kernels: hand-written CUDA kernels for LLM inference on GB10 (sm_121)";
+    m.def("rmsnorm", &rmsnorm, "RMSNorm over the last dim", py::arg("x"), py::arg("w"),
+          py::arg("eps") = 1e-6, py::arg("variant") = -1);
+    m.def("add_rmsnorm_", &add_rmsnorm_, "resid += x; return rmsnorm(resid) * w (bf16, in place)",
+          py::arg("x"), py::arg("resid"), py::arg("w"), py::arg("eps") = 1e-6);
+    m.def("swiglu", &swiglu, "silu(gate) * up", py::arg("gate"), py::arg("up"),
+          py::arg("variant") = -1);
+    m.def("softmax", &softmax, "softmax over the last dim (fp32 math)", py::arg("x"),
+          py::arg("variant") = -1);
+    m.def("sgemm", &sgemm, "fp32 GEMM: a @ b", py::arg("a"), py::arg("b"), py::arg("variant") = -1);
+    m.def("hgemm", &hgemm, "bf16 tensor-core GEMM: a @ b", py::arg("a"), py::arg("b"),
+          py::arg("variant") = -1);
+    m.def("num_variants", &num_variants, "number of implementation variants for a kernel",
+          py::arg("name"));
+}
