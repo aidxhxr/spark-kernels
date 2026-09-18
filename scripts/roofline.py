@@ -7,7 +7,6 @@ Ceilings: 273 GB/s DRAM, 31 TFLOPS fp32 CUDA cores, 213 TFLOPS bf16 tensor cores
 
 from __future__ import annotations
 
-import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -17,6 +16,7 @@ from shape_utils import (  # noqa: E402
     PEAKS,
     arithmetic_intensity,
     flops,
+    load_bench_rows,
     parse_shape,
     traffic_bytes,
 )
@@ -27,22 +27,6 @@ OUT = RESULTS / "roofline.png"
 
 MARKERS = {"bandwidth": "P", "rmsnorm": "o", "add_rmsnorm": "D", "swiglu": "s", "softmax": "^",
            "sgemm": "v", "hgemm": "*"}
-
-
-def load_rows() -> list[dict]:
-    rows = []
-    for p in sorted(RESULTS.glob("*.json")):
-        if p.name == "torch_comparison.json":
-            continue
-        with p.open() as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("{"):
-                    try:
-                        rows.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-    return rows
 
 
 def achieved_tflops(r: dict) -> float:
@@ -65,7 +49,7 @@ def main() -> int:
         print("matplotlib not installed: pip install matplotlib", file=sys.stderr)
         return 1
 
-    rows = [r for r in load_rows() if r.get("ok", True)]
+    rows = [r for r in load_bench_rows(RESULTS) if r.get("ok", True)]
     if not rows:
         print(f"no results in {RESULTS}/ — run ./scripts/run_all_benches.sh first", file=sys.stderr)
         return 1

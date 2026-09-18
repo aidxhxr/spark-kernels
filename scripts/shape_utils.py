@@ -1,8 +1,11 @@
-"""Helpers shared by make_results_table.py and roofline.py: shape parsing, peaks, traffic."""
+"""Helpers shared by make_results_table.py and roofline.py: result loading, shape parsing,
+peaks, traffic."""
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 # GB10 (DGX Spark) ceilings used for "% of peak". See docs/GB10.md for provenance:
 #   273 GB/s  LPDDR5X (256-bit @ 8533 MT/s, NVIDIA spec)
@@ -15,6 +18,32 @@ PEAKS = {
 }
 
 ITEMSIZE = {"f32": 4, "bf16": 2, "fp32": 4, "float32": 4, "bfloat16": 2}
+
+TORCH_COMPARISON = "torch_comparison.json"
+
+
+def load_jsonl(path: Path) -> list[dict]:
+    """Read one JSON object per line, ignoring anything that is not a JSON row."""
+    rows = []
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
+def load_bench_rows(results_dir: Path) -> list[dict]:
+    """Every row written by the C++ benches (results/*.json minus the torch comparison)."""
+    rows: list[dict] = []
+    for p in sorted(results_dir.glob("*.json")):
+        if p.name != TORCH_COMPARISON:
+            rows.extend(load_jsonl(p))
+    return rows
 
 
 def ints_in(s: str) -> list[int]:

@@ -4,7 +4,6 @@ bench_torch.py) into docs/RESULTS.md plus a short results/headline.md for the RE
 
 from __future__ import annotations
 
-import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -12,8 +11,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shape_utils import (  # noqa: E402
     PEAKS,
+    TORCH_COMPARISON,
     arithmetic_intensity,
     is_compute_bound_kernel,
+    load_bench_rows,
+    load_jsonl,
     parse_shape,
 )
 
@@ -25,31 +27,8 @@ OUT_HEADLINE = RESULTS / "headline.md"
 KERNEL_ORDER = ["bandwidth", "rmsnorm", "add_rmsnorm", "swiglu", "softmax", "sgemm", "hgemm"]
 
 
-def load_jsonl(path: Path) -> list[dict]:
-    rows = []
-    with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return rows
-
-
-def load_bench_rows() -> list[dict]:
-    rows: list[dict] = []
-    for p in sorted(RESULTS.glob("*.json")):
-        if p.name == "torch_comparison.json":
-            continue
-        rows.extend(load_jsonl(p))
-    return rows
-
-
 def load_torch_rows() -> dict[tuple, dict]:
-    p = RESULTS / "torch_comparison.json"
+    p = RESULTS / TORCH_COMPARISON
     if not p.exists():
         return {}
     return {(r["kernel"], r["dtype"], r["shape"]): r for r in load_jsonl(p)}
@@ -153,7 +132,7 @@ def headline(by_kernel: dict[str, list[dict]], torch_rows: dict) -> str:
 
 
 def main() -> int:
-    rows = load_bench_rows()
+    rows = load_bench_rows(RESULTS)
     if not rows:
         print(f"no results in {RESULTS}/ — run ./scripts/run_all_benches.sh first", file=sys.stderr)
         return 1
