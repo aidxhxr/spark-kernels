@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ruff
+        run: |
+          pip install ruff
+          ruff check python scripts tests setup.py
+      - name: clang-format
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang-format
+          clang-format --version
+          find include src python/csrc -type f \( -name '*.cu' -o -name '*.cuh' -o -name '*.h' -o -name '*.hpp' -o -name '*.cpp' \) \
+            -print0 | xargs -0 clang-format --dry-run --Werror
+
+  # Compile-only check for sm_121 (no GPU on GitHub runners). Catches syntax/type errors in
+  # the kernels and benches. If the toolkit action ever lacks 13.0, either bump the version
+  # string below or set `continue-on-error: true` on this job.
+  cuda-compile:
+    runs-on: ubuntu-22.04
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: install CUDA 13.0 toolkit (nvcc + cudart + cuBLAS headers) from NVIDIA's apt repo
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            cuda-compiler-13-0 cuda-cudart-dev-13-0 cuda-cccl-13-0 libcublas-dev-13-0
+          echo "/usr/local/cuda-13.0/bin" >> "$GITHUB_PATH"
+          echo "CUDACXX=/usr/local/cuda-13.0/bin/nvcc" >> "$GITHUB_ENV"
+          echo "CUDAToolkit_ROOT=/usr/local/cuda-13.0" >> "$GITHUB_ENV"
+      - name: configure
+        run: |
+          nvcc --version
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=121
+      - name: build
+        run: cmake --build build -j"$(nproc)"
+      - name: list artifacts
+        run: ls -la build | grep -E 'bench_|libspark' || true
+
+  python-tests-cpu:
+    # The GPU tests skip themselves without CUDA; this job only proves the package imports
+    # cleanly and the test suite collects.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install pytest numpy
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m py_compile python/spark_kernels/*.py scripts/*.py tests/*.py setup.py
+          pytest -q --collect-only tests
