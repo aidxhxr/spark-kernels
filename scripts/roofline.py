@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""Roofline plot for the GB10 with every kernel's best measured point.
+"""Roofline plot with every kernel's best measured point.
 
-Reads results/*.json (from run_all_benches.sh) and writes results/roofline.png.
-Ceilings: 273 GB/s DRAM, 31 TFLOPS fp32 CUDA cores, 213 TFLOPS bf16 tensor cores.
+Reads results/*.json (from run_all_benches.sh) and writes results/roofline.png. The ceilings
+come from shape_utils.DEVICE_PEAKS for the device named in the rows (RTX 5090: 1792 GB/s DRAM,
+104.8 TFLOPS fp32; GB10: 273 GB/s, 31 TFLOPS fp32, 213 TFLOPS bf16). The bf16 tensor-core roof
+is only drawn when it is known: pass --bf16-peak=<TFLOPS> for the RTX 5090.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shape_utils import (  # noqa: E402
-    PEAKS,
     arithmetic_intensity,
     flops,
     load_bench_rows,
     parse_shape,
+    peaks_for_rows,
     traffic_bytes,
 )
 
@@ -40,6 +43,10 @@ def achieved_tflops(r: dict) -> float:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--bf16-peak", type=float, default=None, metavar="TFLOPS",
+                    help="measured dense bf16 tensor-core peak for this device")
+    args = ap.parse_args()
     try:
         import matplotlib
 
@@ -62,16 +69,23 @@ def main() -> int:
         if key not in best or r["median_ms"] < best[key]["median_ms"]:
             best[key] = r
 
-    bw = PEAKS["bw_gbps"] * 1e9
+    try:
+        device, peaks = peaks_for_rows(rows, args.bf16_peak)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    bw = peaks["bw_gbps"] * 1e9
     fig, ax = plt.subplots(figsize=(9, 6), dpi=150)
     ai = [2.0**k for k in range(-4, 13)]
     ai_f = [x for x in ai]
-    ax.plot(ai_f, [min(bw * x, PEAKS["fp32_tflops"] * 1e12) / 1e12 for x in ai_f], color="#444",
-            lw=1.5, label=f"fp32 CUDA cores: {PEAKS['fp32_tflops']:g} TFLOPS")
-    ax.plot(ai_f, [min(bw * x, PEAKS["bf16_tflops"] * 1e12) / 1e12 for x in ai_f], color="#76b900",
-            lw=1.5, label=f"bf16 tensor cores: {PEAKS['bf16_tflops']:g} TFLOPS")
-    ax.axvline(PEAKS["bf16_tflops"] * 1e12 / bw, color="#76b900", ls=":", lw=0.8)
-    ax.axvline(PEAKS["fp32_tflops"] * 1e12 / bw, color="#444", ls=":", lw=0.8)
+    roofs = [("fp32 CUDA cores", peaks["fp32_tflops"], "#444"),
+             ("bf16 tensor cores", peaks["bf16_tflops"], "#76b900")]
+    for label, tflops, color in roofs:
+        if not tflops:  # unknown for this device (RTX 5090 bf16 until measured)
+            continue
+        ax.plot(ai_f, [min(bw * x, tflops * 1e12) / 1e12 for x in ai_f], color=color, lw=1.5,
+                label=f"{label}: {tflops:g} TFLOPS")
+        ax.axvline(tflops * 1e12 / bw, color=color, ls=":", lw=0.8)
 
     by_kernel: dict[str, list[dict]] = defaultdict(list)
     for r in best.values():
@@ -89,7 +103,7 @@ def main() -> int:
     ax.set_yscale("log", base=10)
     ax.set_xlabel("arithmetic intensity (FLOP / DRAM byte)")
     ax.set_ylabel("achieved TFLOP/s")
-    ax.set_title(f"GB10 (DGX Spark) roofline — DRAM {PEAKS['bw_gbps']:g} GB/s")
+    ax.set_title(f"{device} roofline — DRAM {peaks['bw_gbps']:g} GB/s")
     ax.grid(True, which="both", alpha=0.25)
     ax.legend(fontsize=8, loc="lower right")
     fig.tight_layout()

@@ -7,15 +7,20 @@ import json
 import re
 from pathlib import Path
 
-# GB10 (DGX Spark) ceilings used for "% of peak". See docs/GB10.md for provenance:
-#   273 GB/s  LPDDR5X (256-bit @ 8533 MT/s, NVIDIA spec)
-#   31 TFLOPS fp32 CUDA cores (6144 cores x 2 FLOP x 2.42 GHz, theoretical)
-#   213 TFLOPS bf16/fp16 tensor cores, fp32 accumulate, dense (community mmapeak measurement)
-PEAKS = {
-    "bw_gbps": 273.0,
-    "fp32_tflops": 31.0,
-    "bf16_tflops": 213.0,
+# Per-device ceilings used for "% of peak", keyed by a substring of the CUDA device name that
+# the benches write into every row. Provenance in docs/RTX5090.md and docs/GB10.md:
+#   RTX 5090  1792 GB/s GDDR7 (512-bit @ 28 Gbps, NVIDIA spec)
+#             104.8 TFLOPS fp32 CUDA cores (21760 cores x 2 FLOP x 2.41 GHz, theoretical)
+#             bf16 tensor-core peak: not published and not measured yet -> None; pass
+#             --bf16-peak=<TFLOPS> to the scripts once you have an mma.sync measurement
+#   GB10      273 GB/s LPDDR5X (256-bit @ 8533 MT/s, NVIDIA spec)
+#             31 TFLOPS fp32 CUDA cores (6144 cores x 2 FLOP x 2.42 GHz, theoretical)
+#             213 TFLOPS bf16/fp16 tensor cores, fp32 accumulate, dense (community measurement)
+DEVICE_PEAKS: dict[str, dict[str, float | None]] = {
+    "RTX 5090": {"bw_gbps": 1792.0, "fp32_tflops": 104.8, "bf16_tflops": None},
+    "GB10": {"bw_gbps": 273.0, "fp32_tflops": 31.0, "bf16_tflops": 213.0},
 }
+DEFAULT_DEVICE = "RTX 5090"  # rows written before the benches recorded a device name
 
 ITEMSIZE = {"f32": 4, "bf16": 2, "fp32": 4, "float32": 4, "bfloat16": 2}
 
@@ -35,6 +40,32 @@ def load_jsonl(path: Path) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return rows
+
+
+def device_key(device_name: str | None) -> str:
+    """Map a CUDA device name ("NVIDIA GeForce RTX 5090") to its DEVICE_PEAKS key."""
+    if not device_name:
+        return DEFAULT_DEVICE
+    for key in DEVICE_PEAKS:
+        if key.lower() in device_name.lower():
+            return key
+    raise ValueError(
+        f"no peaks known for device {device_name!r}; add it to DEVICE_PEAKS in shape_utils.py"
+    )
+
+
+def peaks_for_rows(rows: list[dict], bf16_peak: float | None = None) -> tuple[str, dict]:
+    """(device key, peaks) for a set of bench rows, which must all come from one device."""
+    keys = {device_key(r.get("device")) for r in rows}
+    if len(keys) > 1:
+        raise ValueError(
+            f"results/ mixes devices {sorted(keys)}; keep one machine's *.json per results dir"
+        )
+    key = keys.pop() if keys else DEFAULT_DEVICE
+    peaks = dict(DEVICE_PEAKS[key])
+    if bf16_peak:
+        peaks["bf16_tflops"] = bf16_peak
+    return key, peaks
 
 
 def load_bench_rows(results_dir: Path) -> list[dict]:

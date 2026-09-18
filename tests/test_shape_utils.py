@@ -43,9 +43,18 @@ def test_gemm_flops_and_intensity():
     assert su.arithmetic_intensity("sgemm", "f32", "1024") == pytest.approx(2 * 1024 / 12)
 
 
+def test_ridge_points_match_the_hardware_sheets():
+    gb10 = su.DEVICE_PEAKS["GB10"]
+    assert gb10["bf16_tflops"] * 1e3 / gb10["bw_gbps"] == pytest.approx(780, rel=0.01)
+    assert gb10["fp32_tflops"] * 1e3 / gb10["bw_gbps"] == pytest.approx(114, rel=0.01)
+    rtx = su.DEVICE_PEAKS["RTX 5090"]
+    assert rtx["fp32_tflops"] * 1e3 / rtx["bw_gbps"] == pytest.approx(58.5, rel=0.01)
+    assert rtx["bf16_tflops"] is None  # not measured yet; never guess it
+
+
 def test_elementwise_kernels_sit_left_of_the_ridge():
-    ridge = su.PEAKS["bf16_tflops"] * 1e12 / (su.PEAKS["bw_gbps"] * 1e9)
-    assert ridge == pytest.approx(780, rel=0.01)  # the figure quoted in the README
+    rtx = su.DEVICE_PEAKS["RTX 5090"]
+    ridge = rtx["fp32_tflops"] * 1e3 / rtx["bw_gbps"]  # the lower (fp32) ridge, FLOP/byte
     for kernel in ("rmsnorm", "add_rmsnorm", "softmax", "swiglu"):
         ai = su.arithmetic_intensity(kernel, "bf16", "4096x8192")
         assert 0 < ai < ridge
@@ -61,3 +70,17 @@ def test_load_bench_rows_skips_noise_and_torch_comparison(tmp_path):
     (tmp_path / su.TORCH_COMPARISON).write_text('{"kernel":"rmsnorm","speedup":2.0}\n')
     rows = su.load_bench_rows(tmp_path)
     assert [r["variant"] for r in rows] == [0, 1]
+
+
+def test_device_key_and_peaks_selection():
+    assert su.device_key("NVIDIA GeForce RTX 5090") == "RTX 5090"
+    assert su.device_key("NVIDIA GB10") == "GB10"
+    assert su.device_key(None) == su.DEFAULT_DEVICE  # rows from before the device field
+    with pytest.raises(ValueError, match="no peaks known"):
+        su.device_key("NVIDIA H100")
+
+    key, peaks = su.peaks_for_rows([{"device": "NVIDIA GeForce RTX 5090"}], bf16_peak=700.0)
+    assert key == "RTX 5090" and peaks["bf16_tflops"] == 700.0
+    assert su.DEVICE_PEAKS["RTX 5090"]["bf16_tflops"] is None  # override does not leak
+    with pytest.raises(ValueError, match="mixes devices"):
+        su.peaks_for_rows([{"device": "NVIDIA GeForce RTX 5090"}, {"device": "NVIDIA GB10"}])
