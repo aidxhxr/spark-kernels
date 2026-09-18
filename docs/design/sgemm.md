@@ -4,15 +4,21 @@
 `M, N, K ≥ 1`. Source: `src/kernels/sgemm.cu`; bench: `src/bench/bench_sgemm.cu`.
 
 The point of this ladder is not to beat cuBLAS. It is to show, one change at a time, *which*
-bottleneck each classic GEMM optimization removes, and to measure it on the GB10.
+bottleneck each classic GEMM optimization removes, and to measure it on the RTX 5090 (primary
+target) and later on the GB10.
 
 ## Ceiling
 
-GB10 has 48 SMs × 128 FP32 lanes at ≈2.42 GHz → **≈ 31 TFLOPS fp32 peak** (CUDA cores, no tensor
-cores). Memory is 273 GB/s LPDDR5X, so the fp32 ridge point is 31e12 / 273e9 ≈ **114 FLOP/byte**.
+| | RTX 5090 | GB10 |
+|---|---|---|
+| FP32 lanes | 170 SMs × 128 at ≈ 2.41 GHz | 48 SMs × 128 at ≈ 2.42 GHz |
+| fp32 peak (CUDA cores, no tensor cores) | **≈ 104.8 TFLOPS** | **≈ 31 TFLOPS** |
+| memory | 1,792 GB/s GDDR7 | 273 GB/s LPDDR5X |
+| fp32 ridge point | 104.8e12 / 1,792e9 ≈ **58.5 FLOP/byte** | 31e12 / 273e9 ≈ **114 FLOP/byte** |
+
 A GEMM does `2MNK` FLOPs over `4(MK + KN + MN)` bytes of unique traffic — at 4096³ that is
-≈ 680 FLOP/byte, comfortably compute-bound *if* the kernel reuses data well enough. Naive kernels do
-not, and that is what the rungs fix.
+≈ 683 FLOP/byte, comfortably compute-bound on both *if* the kernel reuses data well enough. Naive
+kernels do not, and that is what the rungs fix.
 
 ## The metric
 
@@ -64,7 +70,7 @@ Implementation notes:
 ## Rung 3 — cp.async double buffering
 
 Rung 2 serialises "load tile t+1" and "compute tile t": while a tile is being fetched the FMA units
-idle. `cp.async` (Ampere+, available on sm_121) copies global → shared *without* passing through
+idle. `cp.async` (Ampere+, available on sm_120 and sm_121) copies global → shared *without* passing through
 registers, so the next tile's copy can be in flight while the current tile is consumed. Two smem
 stages; the loop is
 
@@ -79,7 +85,8 @@ thread-rows (`ty = 0, 1`) read rows `r` and `r + 4`; with an unpadded 8-float st
 `32` floats apart — the same bank, a 2-way conflict on every fragment load. Padding the row to
 12 floats (48 B, still 16-byte aligned for `cp.async`) moves `r + 4` to bank `+16` and removes the
 conflict. The trade is 8 `LDS.32` vs 2 `LDS.128` per `k` for A in exchange for full load/compute
-overlap; on a 273 GB/s part the overlap wins.
+overlap; on a 273 GB/s part I expect the overlap to win. On the RTX 5090 that is less clear,
+see the notes below.
 
 Shared memory: 2 stages × (128×12 + 8×128) × 4 B = 20.5 KB (static, well under 48 KB).
 
@@ -94,7 +101,36 @@ Shared memory: 2 stages × (128×12 + 8×128) × 4 B = 20.5 KB (static, well und
 
 Profile a rung with `scripts/profile_ncu.sh build bench_sgemm --m=4096 --variant=<v>`.
 
-## Results (GB10, 4096×4096×4096) — fill in with `make bench`
+## RTX 5090 notes (expectations, nothing measured yet)
+
+The block and register tile sizes (128×128×8, 8×8) were reasoned for 48 SMs and 273 GB/s. They
+are correct on the 5090; whether they are the best choice there is for the first run to say.
+
+* **Distance to the ridge halves.** Rung 1 feeds the cores at 8 FLOP/byte and rung 2 at
+  32 FLOP/byte from global memory. Against a 58.5 FLOP/byte ridge that is 7× and 1.8× short;
+  on the GB10 (114) it is 14× and 3.6×. L2 reuse has less to make up on the 5090, so I expect
+  rungs 1 and 2 to reach a larger fraction of the fp32 peak than they will on the GB10. How
+  much L2 there is to reuse from: TBD, read it from the bench banner.
+* **Rung 3 vs rung 2 is the open question.** Rung 3 trades cheaper fragment loads (2 `LDS.128`
+  per `k`, transposed A) for load/compute overlap (8 `LDS.32`, untransposed A, padded rows).
+  The stall it hides is the global→shared tile fetch, and a ≈ 10 KB fetch is shorter on a
+  1,792 GB/s bus. The extra `LDS` cost is unchanged. So the rung 3 gain should be smaller than
+  on the GB10 and could be zero or negative. In Nsight Compute: if rung 2 shows little
+  `stall_barrier` / global-load latency between tiles, there is nothing for rung 3 to hide.
+* **Small shapes underfill 170 SMs.** One block per 128×128 tile of C means 16 blocks at 512³,
+  64 at 1024³, 256 at 2048³ and 1,024 at 4096³. The first two cannot occupy the card, so expect
+  "% of cuBLAS" to be at its worst there and to be an occupancy number, not a kernel-quality
+  number. Check `sm__warps_active.avg.pct_of_peak_sustained_active`.
+* **Occupancy cap.** The "2 blocks/SM" figure above assumes the same 65,536-register file per
+  SM as the GB10. I have not verified that for the 5090: check `launch__registers_per_thread`
+  and achieved occupancy in the rung 2 report.
+* `BK = 8` is the first constant to sweep (4, 8, 16) once there is a rung 2 profile to read.
+* 575 W card: compare `min_ms` with the median, and lock clocks (`nvidia-smi -lgc`) if the
+  4096³ numbers wander between runs.
+
+## Results (RTX 5090, 4096×4096×4096) — fill in with `make bench`
+
+A GB10 table is added when the Spark has been benchmarked.
 
 | Variant | ms | TFLOPS | % of cuBLAS |
 |---|---|---|---|

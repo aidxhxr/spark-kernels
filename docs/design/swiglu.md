@@ -56,10 +56,29 @@ probe's number for variant 1) and `smsp__inst_executed.sum` (should fall ~8x for
 variants 0 and 1). If `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` is more than
 `3 * n * sizeof(T) / 32`, loads are not coalesced.
 
-## Results (GB10)
+## RTX 5090 notes (expectations, nothing measured yet)
+
+- The 5/3 traffic ratio is a property of the op, not of the machine, so the ideal speedup
+  over eager is the same 1.67x. The wall time behind it is not: the two removed passes over a
+  4096x14336 bf16 tensor are ~235 MB, which is ≈ 0.86 ms at the GB10's 273 GB/s and ≈ 0.13 ms
+  at the 5090's 1,792 GB/s (spec-sheet arithmetic, not a measurement). Fusion still removes two
+  passes, a launch and a temporary; it buys about 6.5x fewer milliseconds on GDDR7.
+- Variant 0 is instruction-bound before it is DRAM-bound. With ≈ 10.5 GB/s of bus per SM
+  instead of ≈ 5.7, that limiter hides more bandwidth, so I expect the v1/v0 ratio to be larger
+  than on the GB10.
+- The "8 blocks x 256 threads per SM" grid was sized against LPDDR5X latency. The SM count is
+  read at runtime (170 here), the blocks-per-SM constant is not; if v1 sits clearly below the
+  bandwidth probe, sweep it.
+- With 6.5x more bytes per second arriving, `__expf` on the SFU is the first thing that could
+  stop this kernel being purely bandwidth-bound. In Nsight Compute check "Compute Workload
+  Analysis → Pipe utilization (XU)" next to `dram__throughput…pct_of_peak`: if the SFU is
+  visibly busy while DRAM throughput is below the probe's, "% of bandwidth probe" understates
+  the kernel and the roofline point has moved right.
+
+## Results (RTX 5090)
 
 Fill in from `results/swiglu.json` after `make bench`; PyTorch comparison from
-`scripts/bench_torch.py`.
+`scripts/bench_torch.py`. A GB10 table is added when the Spark has been benchmarked.
 
 | dtype | shape | variant | median ms | GB/s | % of bandwidth probe | vs PyTorch eager |
 |-------|-------|---------|-----------|------|----------------------|------------------|

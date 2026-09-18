@@ -1,15 +1,17 @@
-# HGEMM: bf16 tensor-core GEMM on GB10
+# HGEMM: bf16 tensor-core GEMM
 
 `C[M,N] = A[M,K] · B[K,N]`, row-major, bf16 inputs and outputs, fp32 accumulation.
 Source: `src/kernels/hgemm.cu`. Bench: `bench_hgemm` (validates every variant against cuBLAS).
 
-## Why WMMA / mma.sync on this GPU
+## Why WMMA / mma.sync on these GPUs
 
-GB10 is compute capability 12.1, the consumer/workstation Blackwell lineage (same family as
-sm_120 RTX cards). It has fifth-generation tensor cores driven by the classic `mma.sync`
-warp-level instruction, which is what the WMMA C++ API compiles to. The datacenter Blackwell
-parts (sm_100, B200/GB200) add `tcgen05` instructions, TMA and thread-block clusters; those do
-not exist on GB10. So WMMA / `mma.sync` is not a compromise here, it is the native path.
+Both targets are the consumer/workstation Blackwell lineage: the RTX 5090 is compute capability
+12.0 (sm_120, primary target) and the GB10 is 12.1 (sm_121, secondary). They have
+fifth-generation tensor cores driven by the classic `mma.sync` warp-level instruction, which is
+what the WMMA C++ API compiles to. The datacenter Blackwell parts (sm_100, B200/GB200) add
+`tcgen05` instructions, TMA and thread-block clusters; those do not exist on either machine. So
+WMMA / `mma.sync` is not a compromise here, it is the native path, and the same source builds
+for both.
 
 A `wmma::fragment` is a warp-distributed register tile. One `mma_sync` on
 `fragment<..., 16, 16, 16, __nv_bfloat16, ...>` performs a 16×16×16 matrix multiply-accumulate
@@ -40,9 +42,10 @@ GB10's ridge point for bf16 tensor math is
 213 TFLOPS / 273 GB/s ≈ 780 FLOP/byte
 ```
 
-so a 128×128 tile fed from DRAM alone would be memory-bound by a factor of ~12. The reason it
-still works: neighbouring blocks share A rows and B columns, and the 24 MB L2 serves those
-re-reads. For a 4096² problem the A and B matrices are 32 MB each, so L2 hit rate is what
+so a 128×128 tile fed from DRAM alone would be memory-bound by a factor of ~12. (The tile was
+sized with the GB10 in mind; the RTX 5090's bf16 ridge is TBD, see the notes below.) The reason
+it still works: neighbouring blocks share A rows and B columns, and the GB10's 24 MB L2 serves
+those re-reads. For a 4096² problem the A and B matrices are 32 MB each, so L2 hit rate is what
 Nsight Compute should show climbing between v0 and v1 (section *Memory Workload Analysis*,
 `lts__t_sector_hit_rate`). Per-SM the tile's smem-side intensity is the number that matters:
 each fragment loaded from smem is reused across 4 (A) or 2 (B) `mma_sync` calls.
@@ -85,7 +88,43 @@ reference. Both results are a single bf16 rounding of an fp32 sum, so the check 
 `max|C − C_ref| ≤ 0.02·max|C_ref| + 1e-3`, which admits one bf16 ulp on each side plus fp32
 summation-order noise.
 
-## Results (GB10, sm_121, CUDA 13) — fill in from `results/hgemm.json`
+## RTX 5090 notes (expectations, nothing measured yet)
+
+The constants here — 128×128×32 block tile, +8-element padding, 8 warps per tile — were reasoned
+for 48 SMs, 273 GB/s and a 24 MB L2. They are correct on the 5090 and get re-derived after the
+first run.
+
+- **The roof is unknown.** NVIDIA publishes no dense bf16 tensor-core peak for the 5090 and I
+  have not measured one. The GB10's 213 TFLOPS is not scaled. "% of peak" stays "—" in the
+  generated tables until `--bf16-peak=<TFLOPS>` is passed to `scripts/make_results_table.py` /
+  `scripts/roofline.py`; "% of cuBLAS" is the number to read until then.
+- **What DRAM alone can feed.** At 64 FLOP/byte, a tile stream with zero L2 reuse supports up
+  to 64 × 1,792 GB/s ≈ 115 TFLOPS at spec bandwidth (GB10: 64 × 273 ≈ 17.5). Whether that is
+  above or below the tensor-core roof is exactly the TBD above, but the memory-side pressure on
+  this tile size is 6.5× lower than where it was designed. If v1 turns out compute-side
+  limited, `BK = 32` is already enough; if not, `BK = 64` (128 FLOP/byte, needs dynamic smem)
+  is the first thing to try.
+- **L2.** Size TBD (bench banner / `deviceQuery`). The "A and B do not fit" argument is
+  GB10-specific; `lts__t_sector_hit_rate` between v0 and v1 shows how much reuse the 5090's L2
+  actually delivers.
+- **Padding.** Bank geometry is part of the sm_12x programming model, so I expect `ldm = 40` /
+  `ldm = 136` to stay conflict-free. Verify: `l1tex__data_bank_conflicts_pipe_lsu_mem_shared`
+  should be ≈ 0 for v1 and v2.
+- **v2 vs v1.** The `cp.async` pipeline hides the global→shared tile copy behind tensor-core
+  work. The copy (≈ 19 KB per tile step) is shorter on a 1,792 GB/s bus, so there is less to
+  hide unless the tensor cores are faster by a similar factor. I expect a smaller v2 gain than
+  on the GB10. In Nsight Compute compare the stall breakdown of v1 between tiles with
+  `smsp__inst_executed_pipe_tensor.sum` per unit time.
+- **Small shapes underfill 170 SMs.** One block per 128×128 tile of C: 64 blocks at 1024³,
+  256 at 2048³, 1,024 at 4096³. 1024³ cannot occupy the card, and the decode-time shapes in the
+  v3 list (small M, large K) are worse; split-K matters more here than on 48 SMs. Check
+  `sm__warps_active.avg.pct_of_peak_sustained_active` before blaming the tile.
+- 575 W card: compare `min_ms` with the median, lock clocks if 8192³ numbers wander, and run
+  Nsight Compute with admin rights (see [../RTX5090.md](../RTX5090.md#measuring-on-a-geforce-card)).
+
+## Results (RTX 5090, sm_120, CUDA 13) — fill in from `results/hgemm.json`
+
+A GB10 (sm_121) table is added when the Spark has been benchmarked.
 
 | shape (M×N×K) | variant | ms | TFLOPS | cuBLAS ms | % of cuBLAS |
 |---|---|---|---|---|---|
@@ -103,5 +142,6 @@ summation-order noise.
 - Larger `BK` (64) and 3–4 pipeline stages via dynamic shared memory
   (`cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize, ...)`).
 - XOR-swizzled smem layout instead of padding (no wasted bytes, still conflict-free).
-- Split-K for the decode-time shapes (small M, large K) where a 128×128 grid cannot fill 48 SMs.
+- Split-K for the decode-time shapes (small M, large K) where a 128×128 grid cannot fill 48 SMs,
+  let alone 170.
 - Persistent-block scheduling with a tile rasterization that maximises L2 reuse of A/B.

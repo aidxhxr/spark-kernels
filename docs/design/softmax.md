@@ -47,10 +47,12 @@ merge((m1, s1), (m2, s2)):
 a strided slice of the row, then a five-step `__shfl_xor_sync` butterfly merges the 32 lane states
 so every lane holds the row result. Lanes read 16 bytes at a time (`float4` or 8 x bf16), so one
 warp instruction moves 512 contiguous bytes: full coalescing and the fewest possible load
-instructions per byte, which is what a memory-bound kernel needs on GB10's 273 GB/s bus.
+instructions per byte, which is what a memory-bound kernel needs on either target's bus
+(1,792 GB/s on the RTX 5090, 273 GB/s on the GB10).
 
 The write pass re-reads the row. That second read is served from L2 (a 16384-wide bf16 row is
-32 KB; the GB10 has 24 MB of L2), so DRAM sees roughly one read and one write of the matrix.
+32 KB; the GB10 has 24 MB of L2, the RTX 5090's L2 size is TBD but a 32 KB row is small), so
+DRAM sees roughly one read and one write of the matrix.
 
 **Edge case**: merging two `-inf` maxima gives `exp(-inf − (-inf)) = NaN`. The merge returns
 `s = 0` when the merged max is `-inf`, which is the mathematically consistent answer for "no
@@ -79,8 +81,9 @@ bytes = 2 · rows · cols · sizeof(T)
 GB/s  = bytes / time
 ```
 
-The bench reports `gbps` against that formula, so the number to compare with is the GB10's
-273 GB/s peak (see `docs/GB10.md`), or better, the achieved copy bandwidth from `bench_bandwidth`.
+The bench reports `gbps` against that formula, so the number to compare with is the RTX 5090's
+1,792 GB/s peak (see `docs/RTX5090.md`; 273 GB/s on the GB10, `docs/GB10.md`), or better, the
+achieved copy bandwidth from `bench_bandwidth`.
 bf16 moves half the bytes of f32 for the same shape, so at the same GB/s it is twice as fast.
 
 ## What to look at in Nsight Compute
@@ -101,10 +104,29 @@ ncu --set full --kernel-name regex:softmax_ ./build/bench_softmax --cols=4096 --
 - **Warp State → Stall Long Scoreboard**: memory latency. Variant 2 exists to hide it on long
   rows by putting more loads in flight per row.
 
-## Results (GB10)
+## RTX 5090 notes (expectations, nothing measured yet)
 
-Filled by `make bench` (`results/softmax.json`) and `scripts/make_results_table.py`.
+- **The `cols > 4096` crossover from variant 1 to variant 2 was reasoned for the GB10.** One
+  warp per row has to keep enough 16-byte loads in flight to use its share of the bus, and
+  that share is ≈ 10.5 GB/s per SM here against ≈ 5.7 on the GB10. I expect variant 2 to start
+  winning at shorter rows on the 5090. Sweep `--cols` (1024 … 16384) for both variants and move
+  the constant in the Python binding to where they cross; either value is correct.
+- **Few rows underfill the card.** Variant 1 launches `rows / 4` blocks. 4096 rows is 1,024
+  blocks, fine for 170 SMs; decode-time shapes with a few dozen rows are not, and there the
+  block-per-row mapping may win on occupancy alone regardless of `cols`.
+- **`__expf` is the candidate second limiter.** By FLOP count softmax is far left of the
+  58.5 FLOP/byte fp32 ridge, but the exponential runs on the SFU, and the bytes now arrive
+  6.5x faster. Check "Pipe utilization (XU)" against "DRAM Throughput (% of peak)": SFU busy
+  with DRAM throughput well below the copy probe means the kernel is no longer purely
+  bandwidth-bound on this card, and GB/s understates it.
+- "Stall Long Scoreboard" is still the metric that says variant 2 is doing its job.
+- Compare `min_ms` with the median; the card boosts and throttles.
 
-| dtype | shape | variant | median ms | GB/s | % of 273 GB/s | speedup vs naive |
+## Results (RTX 5090)
+
+Filled by `make bench` (`results/softmax.json`) and `scripts/make_results_table.py`. A GB10
+table (% of 273 GB/s) is added when the Spark has been benchmarked.
+
+| dtype | shape | variant | median ms | GB/s | % of 1,792 GB/s | speedup vs naive |
 |---|---|---|---|---|---|---|
 | | | | | | | |
