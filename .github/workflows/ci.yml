@@ -52,8 +52,8 @@ jobs:
         run: ls -la build | grep -E 'bench_|libspark' || true
 
   python-tests-cpu:
-    # The GPU tests skip themselves without CUDA; this job only proves the package imports
-    # cleanly and the test suite collects.
+    # The GPU tests skip themselves without CUDA; this job proves every Python file compiles,
+    # the suite collects, and the CPU-only tests (results-script helpers) pass.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -64,4 +64,4 @@ jobs:
           pip install pytest numpy
           pip install --index-url https://download.pytorch.org/whl/cpu torch
           python -m py_compile python/spark_kernels/*.py scripts/*.py tests/*.py setup.py
-          pytest -q --collect-only tests
+          pytest -q tests
