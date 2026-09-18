@@ -30,6 +30,9 @@ struct Timing {
 // Times `fn` (which must enqueue work on `stream`) and returns the median wall time.
 inline Timing time_kernel(const std::function<void()>& fn, cudaStream_t stream, int warmup = 10,
                           int iters = 100) {
+    // A bad --iters (0, negative, or non-numeric, which atoi maps to 0) would otherwise index
+    // an empty sample vector below.
+    SPARK_REQUIRE(iters > 0, "time_kernel: iters must be >= 1");
     cudaEvent_t start, stop;
     SPARK_CUDA_CHECK(cudaEventCreate(&start));
     SPARK_CUDA_CHECK(cudaEventCreate(&stop));
