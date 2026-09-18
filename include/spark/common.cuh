@@ -45,6 +45,20 @@ __host__ __device__ __forceinline__ constexpr int64_t cdiv64(int64_t a, int64_t 
     return (a + b - 1) / b;
 }
 
+// SM count of the current device; the grid-stride kernels size their grids from it. Cached
+// after the first call. If the attribute query reports nothing, assume the primary target.
+constexpr int kFallbackSMs = 170;  // RTX 5090 (the GB10 has 48)
+inline int num_sms() {
+    static int sms = 0;
+    if (sms == 0) {
+        int dev = 0;
+        SPARK_CUDA_CHECK(cudaGetDevice(&dev));
+        SPARK_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
+        if (sms <= 0) sms = kFallbackSMs;
+    }
+    return sms;
+}
+
 constexpr int kWarpSize = 32;
 constexpr unsigned kFullMask = 0xffffffffu;
 

@@ -97,17 +97,6 @@ __global__ void swiglu_vec_bf16_kernel(const __nv_bfloat16* __restrict__ gate,
     }
 }
 
-int num_sms() {
-    static int sms = 0;
-    if (sms == 0) {
-        int dev = 0;
-        SPARK_CUDA_CHECK(cudaGetDevice(&dev));
-        SPARK_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
-        if (sms <= 0) sms = 48;  // GB10 SM count (RTX 5090: 170)
-    }
-    return sms;
-}
-
 bool aligned16(const void* p) {
     return (reinterpret_cast<uintptr_t>(p) % 16) == 0;
 }

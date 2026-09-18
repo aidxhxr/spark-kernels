@@ -45,17 +45,6 @@ __global__ void copy_tail_kernel(const float* __restrict__ x, float* __restrict_
     if (i < n) y[i] = x[i];
 }
 
-int num_sms() {
-    static int sms = 0;
-    if (sms == 0) {
-        int dev = 0;
-        SPARK_CUDA_CHECK(cudaGetDevice(&dev));
-        SPARK_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
-        if (sms <= 0) sms = 48;  // GB10 SM count (RTX 5090: 170)
-    }
-    return sms;
-}
-
 unsigned grid_for(int64_t work_items, int block) {
     const int64_t blocks = cdiv64(work_items, block);
     SPARK_REQUIRE(blocks > 0 && blocks < (int64_t{1} << 31), "bandwidth_copy: grid too large");
