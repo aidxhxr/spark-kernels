@@ -1,6 +1,7 @@
 # Convenience wrapper. Real build logic lives in CMakeLists.txt / setup.py.
+# ARCH: 120 = RTX 5090 (default), 121 = DGX Spark / GB10, "120;121" = both.
 BUILD ?= build
-ARCH  ?= 121
+ARCH  ?= 120
 
 CXX_SOURCES = $(shell find include src python/csrc -type f \
 	\( -name '*.cu' -o -name '*.cuh' -o -name '*.h' -o -name '*.hpp' -o -name '*.cpp' \))
@@ -21,7 +22,7 @@ help:
 	@echo "clean    remove build outputs"
 
 configure:
-	cmake -S . -B $(BUILD) -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=$(ARCH)
+	cmake -S . -B $(BUILD) -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CUDA_ARCHITECTURES=$(ARCH)"
 
 build: configure
 	cmake --build $(BUILD) -j

@@ -4,7 +4,7 @@
 [project]
 name = "spark-kernels"
 version = "0.1.0"
-description = "Hand-written CUDA kernels for LLM inference on the NVIDIA DGX Spark (GB10, sm_121)"
+description = "Hand-written CUDA kernels for LLM inference on Blackwell: RTX 5090 (sm_120) and DGX Spark (GB10, sm_121)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

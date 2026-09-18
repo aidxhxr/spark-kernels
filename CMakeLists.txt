@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 project(spark_kernels LANGUAGES CXX CUDA)
 
-# GB10 (DGX Spark) is compute capability 12.1. Override with -DCMAKE_CUDA_ARCHITECTURES=...
+# Primary target: RTX 5090, compute capability 12.0 (sm_120). The DGX Spark (GB10) is 12.1:
+# pass -DCMAKE_CUDA_ARCHITECTURES=121, or "120;121" for one build that runs on both.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
-  set(CMAKE_CUDA_ARCHITECTURES 121)
+  set(CMAKE_CUDA_ARCHITECTURES 120)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)

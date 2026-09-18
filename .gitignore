@@ -17,7 +17,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 
-# benchmark outputs are regenerated on the Spark; keep the folder, not the data
+# benchmark outputs are regenerated on the GPU; keep the folder, not the data
 results/*.json
 results/*.png
 results/*.csv
