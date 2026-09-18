@@ -2,10 +2,13 @@
 # Profile the headline kernels with Nsight Compute and dump the "details" page as text.
 #   ./scripts/profile_ncu.sh [build_dir]
 #
-# Permissions: on DGX OS, ncu needs access to GPU performance counters. Either run with
+# Permissions: ncu needs access to GPU performance counters, which the driver restricts to
+# admins by default (GeForce boards like the RTX 5090 and DGX OS alike). Either run with
 # sudo, or allow all users once:
 #   echo 'options nvidia NVreg_RestrictProfilingToAdminUsers=0' | sudo tee /etc/modprobe.d/ncu.conf
 #   sudo update-initramfs -u && sudo reboot
+# If the RTX 5090 also drives a display, close GPU-heavy desktop apps first: their launches
+# share the counters and show up as noise in the DRAM/SM throughput metrics.
 set -euo pipefail
 
 BUILD_DIR="${1:-build}"

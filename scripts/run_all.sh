@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# One-shot pipeline for a fresh DGX Spark session:
+# One-shot pipeline for a fresh session on the GPU box (RTX 5090 by default):
 #   build C++ benches -> run them (validates every variant) -> generate tables + roofline
 #   -> build the PyTorch extension -> pytest -> torch comparison -> Nsight Compute reports.
 # Each stage is optional: pass --skip-python or --skip-ncu to leave those out.
+# On the DGX Spark: ARCH=121 TORCH_CUDA_ARCH_LIST=12.1 ./scripts/run_all.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SKIP_PYTHON=0; SKIP_NCU=0
+export ARCH="${ARCH:-120}"
 for a in "$@"; do
   case "$a" in
     --skip-python) SKIP_PYTHON=1 ;;
@@ -19,11 +21,11 @@ step() { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 
 step "toolchain"
 nvcc --version | tail -1
-nvidia-smi --query-gpu=name,driver_version --format=csv,noheader || true
+nvidia-smi --query-gpu=name,driver_version,compute_cap,power.limit --format=csv,noheader || true
 cmake --version | head -1
 
-step "build (sm_121)"
-make build
+step "build (sm_$ARCH)"
+make build "ARCH=$ARCH"
 
 step "benchmarks (also validates every variant against cuBLAS / CPU reference)"
 make bench
