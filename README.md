@@ -75,6 +75,10 @@ python scripts/bench_torch.py   # speedup vs PyTorch eager
 make ncu              # Nsight Compute reports for hgemm and rmsnorm
 ```
 
+`make help` lists every target. `make lint` runs the same ruff and clang-format checks as CI,
+and `pytest -q tests` works on a machine without a GPU too: the parity tests skip and only the
+results-script helpers are tested.
+
 Or run the whole sequence in one go with `./scripts/run_on_spark.sh`.
 
 Individual benches accept overrides, for example:
