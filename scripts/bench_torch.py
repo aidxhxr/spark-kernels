@@ -2,7 +2,7 @@
 """Time spark_kernels ops against PyTorch eager on the same shapes as the C++ benches.
 
 Writes results/torch_comparison.json (one JSON object per row) and prints a table.
-Run on the DGX Spark after `pip install -e . --no-build-isolation`.
+Run on the GPU box (RTX 5090 or DGX Spark) after `pip install -e . --no-build-isolation`.
 """
 
 from __future__ import annotations
@@ -102,9 +102,12 @@ def main() -> int:
     import spark_kernels as sk
 
     rows_out: list[dict] = []
+    device = torch.cuda.get_device_name()
+    print(f"device: {device} | cc {torch.cuda.get_device_capability()}", file=sys.stderr)
 
     def add(kernel, dtype, shape, ours_ms, torch_ms, gbps=None, tflops=None):
         r = {
+            "device": device,
             "kernel": kernel,
             "dtype": dtype,
             "shape": shape,
