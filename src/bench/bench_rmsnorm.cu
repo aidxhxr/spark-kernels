@@ -121,6 +121,7 @@ bool bench_rmsnorm_dtype(int rows, int cols, int iters, cudaStream_t stream) {
         row.variant = variant;
         row.shape = std::to_string(rows) + "x" + std::to_string(cols);
         row.median_ms = t.median_ms;
+        row.min_ms = t.min_ms;
         row.gbps = bytes / (t.median_ms * 1e-3) / 1e9;
         row.ref_ms = naive_ms;
         row.max_abs_err = err.max_abs;
@@ -202,6 +203,7 @@ bool bench_add_rmsnorm(int rows, int cols, int iters, cudaStream_t stream) {
     row.variant = 0;
     row.shape = std::to_string(rows) + "x" + std::to_string(cols);
     row.median_ms = t.median_ms;
+    row.min_ms = t.min_ms;
     row.gbps = bytes / (t.median_ms * 1e-3) / 1e9;
     row.ref_ms = 0.0;
     row.max_abs_err = std::max(err_out.max_abs, err_res.max_abs);

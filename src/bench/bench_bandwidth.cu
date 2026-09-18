@@ -44,6 +44,7 @@ bool run_size(int64_t n, int iters, cudaStream_t stream) {
         r.variant = -1;
         r.shape = shape_str(n);
         r.median_ms = ref.median_ms;
+        r.min_ms = ref.min_ms;
         r.gbps = moved_gb / (ref.median_ms * 1e-3);
         r.ref_ms = ref.median_ms;
         r.ok = true;
@@ -67,6 +68,7 @@ bool run_size(int64_t n, int iters, cudaStream_t stream) {
         r.variant = v;
         r.shape = shape_str(n);
         r.median_ms = t.median_ms;
+        r.min_ms = t.min_ms;
         r.gbps = moved_gb / (t.median_ms * 1e-3);
         r.ref_ms = ref.median_ms;
         r.max_abs_err = ok ? 0.0 : 1.0;

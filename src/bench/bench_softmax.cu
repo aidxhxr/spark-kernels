@@ -127,6 +127,7 @@ bool run_shape(int rows, int cols, int iters, cudaStream_t stream) {
         r.variant = variant;
         r.shape = shape;
         r.median_ms = t.median_ms;
+        r.min_ms = t.min_ms;
         r.gbps = bytes / (t.median_ms * 1e-3) / 1e9;
         r.tflops = 0.0;
         r.ref_ms = ref_ms;

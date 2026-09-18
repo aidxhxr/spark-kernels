@@ -116,6 +116,7 @@ int main(int argc, char** argv) {
             r.variant = -1;
             r.shape = shape_str;
             r.median_ms = tref.median_ms;
+            r.min_ms = tref.min_ms;
             r.tflops = tflops_of(s, tref.median_ms);
             r.ref_ms = tref.median_ms;
             print_row(r);
@@ -147,6 +148,7 @@ int main(int argc, char** argv) {
             r.variant = v;
             r.shape = shape_str;
             r.median_ms = t.median_ms;
+            r.min_ms = t.min_ms;
             r.tflops = tflops_of(s, t.median_ms);
             r.ref_ms = tref.median_ms;
             r.max_abs_err = err.max_abs;

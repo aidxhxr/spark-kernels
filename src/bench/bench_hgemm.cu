@@ -121,6 +121,7 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
     row.variant = variant;
     row.shape = std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
     row.median_ms = t_us.median_ms;
+    row.min_ms = t_us.min_ms;
     row.tflops = flops / (t_us.median_ms * 1e-3) / 1e12;
     row.gbps = 0.0;
     row.ref_ms = t_ref.median_ms;

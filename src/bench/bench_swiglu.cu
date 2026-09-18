@@ -109,6 +109,7 @@ bool run_shape(int64_t n, const std::string& shape, int iters, cudaStream_t stre
         r.variant = v;
         r.shape = shape;
         r.median_ms = t.median_ms;
+        r.min_ms = t.min_ms;
         r.gbps = moved_gb / (t.median_ms * 1e-3);
         r.ref_ms = v0_ms;  // reference = the naive variant on the same shape
         r.max_abs_err = err.max_abs;
