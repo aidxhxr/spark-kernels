@@ -13,21 +13,36 @@
 - **One 128-bit transaction per thread** is the target memory access pattern for the
   memory-bound kernels (`bf16x8`, `f32x4` in `common.cuh`).
 
-## Target
+## Targets
 
-GB10 (`sm_121`). What that means for kernel design:
+Primary: RTX 5090 (`sm_120`, [RTX5090.md](RTX5090.md)). Secondary: GB10 / DGX Spark (`sm_121`,
+[GB10.md](GB10.md)), to be benchmarked when the machine arrives. Same source for both; only the
+arch flag and the tuning constants differ. What the two machines mean for kernel design:
 
-| Fact | Consequence |
-|---|---|
-| 273 GB/s LPDDR5X | Memory-bound kernels are judged as % of this. Fusion matters more than on HBM parts. |
-| ~213 TFLOPS bf16 dense (measured) | Ridge point ≈ 780 FLOP/byte; a GEMM block tile must reuse operands heavily through smem and L2. |
-| 24 MB L2 | Large enough that a 4096×4096 bf16 operand (32 MB) does *not* fit, so tile-order matters. |
-| `mma.sync` yes, `tcgen05`/TMA no | Tensor-core GEMMs use the WMMA API and `cp.async`, not CUTLASS 3.x SM100 pipelines. |
-| 48 SMs | Grid sizes for grid-stride kernels are set from `multiProcessorCount` at runtime. |
+| Fact | RTX 5090 | GB10 | Consequence |
+|---|---|---|---|
+| Memory bandwidth | 1,792 GB/s GDDR7, discrete | 273 GB/s LPDDR5X, unified | Memory-bound kernels are judged as % of this. Fusion removes whole passes and launches on both; the time saved per pass is ~6.5× larger on the GB10, where it matters more than on HBM parts. GDDR7 is much closer to HBM-class. |
+| fp32 peak | ≈ 104.8 TFLOPS | ≈ 31 TFLOPS | fp32 ridge ≈ 58.5 vs 114 FLOP/byte. A 4096³ SGEMM (≈ 683 FLOP/byte) is compute-bound on both, with more margin on the 5090. |
+| bf16 dense peak | TBD — not published, not measured yet | ~213 TFLOPS (community measurement) | GB10 ridge ≈ 780 FLOP/byte; a GEMM block tile must reuse operands heavily through smem and L2. 5090 ridge TBD; "% of peak" for `hgemm` stays "—" until `--bf16-peak=<TFLOPS>` is passed to the results scripts. The GB10 number is not scaled. |
+| L2 | TBD — read from the bench banner / `deviceQuery` | 24 MB | GB10: a 4096×4096 bf16 operand (32 MB) does *not* fit, so tile order matters. Whether it fits on the 5090 is open until the L2 size is known. |
+| `mma.sync` yes, `tcgen05`/TMA no | same | same | Tensor-core GEMMs use the WMMA API and `cp.async`, not CUTLASS 3.x SM100 pipelines. |
+| SMs | 170 | 48 | Grid sizes for grid-stride kernels are set from `multiProcessorCount` at runtime. Fixed-size launches (one block per GEMM tile, one block per row) need 3.5× more blocks to fill the 5090. |
+
+The tile sizes and crossovers in the kernels (`hgemm` 128×128×32 with +8 padding and 8 warps per
+tile, `sgemm` 128×128×8 with an 8×8 register tile, `cols > 8192` / `cols > 4096` for the
+block-per-row rmsnorm / softmax) were reasoned for 48 SMs and 273 GB/s. They are correct on
+both machines and get re-derived for the 5090 after the first benchmark run; each per-kernel
+note has an "RTX 5090 notes" section saying what I expect to move. Expectations, not results.
 
 ## Measuring
 
-- CUDA events around each launch, 10 warmup iterations, median of 100.
+- CUDA events around each launch, 5–10 warmup launches per timing loop (`--warmup=N`
+  overrides all of them), median of 100 (`--iters=N`). The first kernel of each bench process is
+  also spun for ~300 ms so a cold 5090 has reached its boost clocks; `--warmup=0` disables that
+  too. The minimum is recorded next to the median (`min_ms`): the 5090 boosts and
+  throttles, and a median far above the min means the clocks moved during the run.
+- Every JSON row carries a `device` field. The results scripts pick that device's ceilings
+  from `scripts/shape_utils.py` and refuse a `results/` directory that mixes machines.
 - Achieved bandwidth = bytes that *must* cross DRAM for the op (documented per kernel) ÷ time.
   This is a lower bound on true traffic and therefore a conservative efficiency number.
 - Achieved TFLOPS = `2·M·N·K ÷ time`.
@@ -51,6 +66,7 @@ design docs:
 
 ## Per-kernel notes
 
+- hardware: [RTX 5090](RTX5090.md), [GB10](GB10.md)
 - [bandwidth](design/bandwidth.md)
 - [rmsnorm / add_rmsnorm](design/rmsnorm.md)
 - [swiglu](design/swiglu.md)
