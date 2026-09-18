@@ -5,9 +5,12 @@ import torch
 def pytest_collection_modifyitems(config, items):
     if torch.cuda.is_available():
         return
+    # Only tests that touch the compiled extension (via the `sk` fixture) need a GPU; the
+    # rest (e.g. the results-script helpers) run anywhere, including CI.
     skip = pytest.mark.skip(reason="CUDA GPU required")
     for item in items:
-        item.add_marker(skip)
+        if "sk" in getattr(item, "fixturenames", ()):
+            item.add_marker(skip)
 
 
 TOL = {
