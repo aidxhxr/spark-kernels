@@ -102,7 +102,7 @@ make results          # docs/RESULTS.md + results/roofline.png + results/headlin
 
 pip install -e . --no-build-isolation   # PyTorch extension, sm_120 unless TORCH_CUDA_ARCH_LIST is set ("12.1" for the Spark)
 pytest -q tests       # parity tests against torch for every variant
-python scripts/bench_torch.py   # speedup vs PyTorch eager
+python scripts/bench_torch.py   # speedup vs PyTorch eager (--iters=N, --warmup=N as in the C++ benches)
 
 make ncu              # Nsight Compute reports for hgemm and rmsnorm
 ```
