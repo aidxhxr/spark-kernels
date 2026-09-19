@@ -7,6 +7,7 @@ Run on the GPU box (RTX 5090 or DGX Spark) after `pip install -e . --no-build-is
 
 from __future__ import annotations
 
+import argparse
 import json
 import statistics
 import sys
@@ -23,7 +24,10 @@ GEMM_SHAPES = [(1024, 1024, 1024), (2048, 2048, 2048), (4096, 4096, 4096), (4096
 WARMUP, ITERS = 10, 100
 
 
-def time_ms(fn, warmup=WARMUP, iters=ITERS) -> float:
+def time_ms(fn, warmup=None, iters=None) -> float:
+    # read the globals at call time so --warmup/--iters apply to every call site
+    warmup = WARMUP if warmup is None else warmup
+    iters = ITERS if iters is None else iters
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -95,7 +99,29 @@ def bench_gemms(sk, add, M, N, K):
     add("hgemm", "bf16", shape, ours, ref, tflops=flops / ours / 1e9)
 
 
+def positive_int(text: str) -> int:
+    n = int(text)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")  # median of no samples is undefined
+    return n
+
+
+def non_negative_int(text: str) -> int:
+    n = int(text)
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return n
+
+
 def main() -> int:
+    global WARMUP, ITERS
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--iters", type=positive_int, default=ITERS,
+                    help="timed iterations per op (default: %(default)s, same as the C++ benches)")
+    ap.add_argument("--warmup", type=non_negative_int, default=WARMUP,
+                    help="untimed iterations before each measurement (default: %(default)s)")
+    args = ap.parse_args()
+    WARMUP, ITERS = args.warmup, args.iters
     if not torch.cuda.is_available():
         print("CUDA not available", file=sys.stderr)
         return 1
