@@ -21,6 +21,8 @@ __pycache__/
 results/*.json
 results/*.png
 results/*.csv
+results/ncu_*.txt
+results/headline.md
 !results/.gitkeep
 # the roofline is the one output the README links to, so it is committed after a run
 !results/roofline.png
