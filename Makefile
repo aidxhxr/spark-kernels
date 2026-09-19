@@ -11,15 +11,16 @@ CXX_SOURCES = $(shell find include src python/csrc -type f \
 all: build
 
 help:
-	@echo "build    cmake configure + build for sm_$(ARCH) into $(BUILD)/"
-	@echo "bench    run every bench_* binary, write results/*.json"
-	@echo "results  docs/RESULTS.md, results/headline.md, results/roofline.png"
-	@echo "python   pip install -e . (PyTorch extension)"
-	@echo "test     install the extension, then pytest parity tests for every variant"
-	@echo "lint     ruff + clang-format --dry-run, same checks as CI"
-	@echo "format   clang-format -i on all C++/CUDA sources"
-	@echo "ncu      Nsight Compute reports for hgemm and rmsnorm"
-	@echo "clean    remove build outputs"
+	@echo "configure  cmake configure only, for sm_$(ARCH) into $(BUILD)/ (ARCH=121 for the DGX Spark)"
+	@echo "build      cmake configure + build for sm_$(ARCH) into $(BUILD)/"
+	@echo "bench      run every bench_* binary, write results/*.json"
+	@echo "results    docs/RESULTS.md, results/headline.md, results/roofline.png"
+	@echo "python     pip install -e . (PyTorch extension)"
+	@echo "test       install the extension, then pytest parity tests for every variant"
+	@echo "lint       ruff + clang-format --dry-run, same checks as CI"
+	@echo "format     clang-format -i on all C++/CUDA sources"
+	@echo "ncu        Nsight Compute reports for hgemm and rmsnorm"
+	@echo "clean      remove build outputs"
 
 configure:
 	cmake -S . -B $(BUILD) -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CUDA_ARCHITECTURES=$(ARCH)"
