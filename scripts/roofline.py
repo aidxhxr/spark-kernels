@@ -42,6 +42,14 @@ def achieved_tflops(r: dict) -> float:
     return fl / (r["median_ms"] * 1e-3) / 1e12 if r["median_ms"] > 0 else 0.0
 
 
+def plot_intensity(r: dict) -> float:
+    """x position on the roofline. The copy has no FLOPs, so it is pinned at 1 FLOP/byte to
+    match achieved_tflops(); there its height reads directly as bytes/s against the DRAM roof."""
+    if r["kernel"] == "bandwidth":
+        return 1.0
+    return arithmetic_intensity(r["kernel"], r["dtype"], r["shape"])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bf16-peak", type=float, default=None, metavar="TFLOPS",
@@ -91,7 +99,7 @@ def main() -> int:
     for r in best.values():
         by_kernel[r["kernel"]].append(r)
     for kernel, krows in sorted(by_kernel.items()):
-        xs = [arithmetic_intensity(r["kernel"], r["dtype"], r["shape"]) for r in krows]
+        xs = [plot_intensity(r) for r in krows]
         ys = [achieved_tflops(r) for r in krows]
         pts = [(x, y) for x, y in zip(xs, ys, strict=True) if x > 0 and y > 0]
         if not pts:
