@@ -22,6 +22,8 @@ results/*.json
 results/*.png
 results/*.csv
 !results/.gitkeep
+# the roofline is the one output the README links to, so it is committed after a run
+!results/roofline.png
 
 # editors / OS
 .vscode/
