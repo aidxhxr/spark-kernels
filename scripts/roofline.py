@@ -85,13 +85,12 @@ def main() -> int:
     bw = peaks["bw_gbps"] * 1e9
     fig, ax = plt.subplots(figsize=(9, 6), dpi=150)
     ai = [2.0**k for k in range(-4, 13)]
-    ai_f = [x for x in ai]
     roofs = [("fp32 CUDA cores", peaks["fp32_tflops"], "#444"),
              ("bf16 tensor cores", peaks["bf16_tflops"], "#76b900")]
     for label, tflops, color in roofs:
         if not tflops:  # unknown for this device (RTX 5090 bf16 until measured)
             continue
-        ax.plot(ai_f, [min(bw * x, tflops * 1e12) / 1e12 for x in ai_f], color=color, lw=1.5,
+        ax.plot(ai, [min(bw * x, tflops * 1e12) / 1e12 for x in ai], color=color, lw=1.5,
                 label=f"{label}: {tflops:g} TFLOPS")
         ax.axvline(tflops * 1e12 / bw, color=color, ls=":", lw=0.8)
 
