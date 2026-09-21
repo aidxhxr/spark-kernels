@@ -29,6 +29,12 @@ TORCH_COMPARISON = "torch_comparison.json"
 # The C++ benches name some rows after the entry point they time rather than the kernel family
 # everything here keys on (tables, peaks, traffic, FLOPs, the torch comparison).
 KERNEL_ALIASES = {"hgemm_bf16": "hgemm", "bandwidth_copy": "bandwidth"}
+# Rows that time the library reference instead of one of our variants (variant -1 in the JSON):
+# bench name -> (kernel family, label shown in the variant column).
+REFERENCE_ROWS = {
+    "sgemm_cublas": ("sgemm", "cuBLAS"),
+    "cudaMemcpy_d2d": ("bandwidth", "cudaMemcpy"),
+}
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -73,11 +79,20 @@ def peaks_for_rows(rows: list[dict], bf16_peak: float | None = None) -> tuple[st
 
 
 def normalize_row(r: dict) -> dict:
-    """A bench row with its kernel renamed to the family name (see KERNEL_ALIASES)."""
+    """A bench row with its kernel renamed to the family name (see KERNEL_ALIASES), and the
+    library reference rows filed under that family with a "reference" label."""
     kernel = r.get("kernel")
     if kernel in KERNEL_ALIASES:
         r = {**r, "kernel": KERNEL_ALIASES[kernel]}
+    elif kernel in REFERENCE_ROWS:
+        family, label = REFERENCE_ROWS[kernel]
+        r = {**r, "kernel": family, "reference": label}
     return r
+
+
+def is_reference(r: dict) -> bool:
+    """True for a cuBLAS / cudaMemcpy row: shown in the tables, never a "best variant"."""
+    return "reference" in r
 
 
 def load_bench_rows(results_dir: Path) -> list[dict]:

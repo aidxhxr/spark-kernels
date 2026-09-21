@@ -14,6 +14,7 @@ from shape_utils import (  # noqa: E402
     TORCH_COMPARISON,
     arithmetic_intensity,
     is_compute_bound_kernel,
+    is_reference,
     load_bench_rows,
     load_jsonl,
     parse_shape,
@@ -92,7 +93,7 @@ def table_for(kernel: str, rows: list[dict], torch_rows: dict, peaks: dict) -> s
         cells = [
             r["dtype"],
             r["shape"],
-            str(r["variant"]),
+            r["reference"] if is_reference(r) else str(r["variant"]),
             fmt(r["median_ms"], 4),
             fmt(r.get("min_ms", 0), 4),
             fmt(val, 2),
@@ -124,7 +125,8 @@ def headline(by_kernel: dict[str, list[dict]], torch_rows: dict, peaks: dict) ->
             continue
         unit, peak = peak_for(kernel, peaks)
         for dtype in sorted({r["dtype"] for r in rows}):
-            drows = [r for r in rows if r["dtype"] == dtype and r.get("ok", True)]
+            drows = [r for r in rows
+                     if r["dtype"] == dtype and r.get("ok", True) and not is_reference(r)]
             if not drows:
                 continue
             biggest = max(shape_size(kernel, r["shape"]) for r in drows)

@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shape_utils import (  # noqa: E402
     arithmetic_intensity,
     flops,
+    is_reference,
     load_bench_rows,
     parse_shape,
     peaks_for_rows,
@@ -64,7 +65,8 @@ def main() -> int:
         print("matplotlib not installed: pip install matplotlib", file=sys.stderr)
         return 1
 
-    rows = [r for r in load_bench_rows(RESULTS) if r.get("ok", True)]
+    # our variants only: the cuBLAS / cudaMemcpy reference rows are not points of the ladder
+    rows = [r for r in load_bench_rows(RESULTS) if r.get("ok", True) and not is_reference(r)]
     if not rows:
         print(f"no results in {RESULTS}/ — run ./scripts/run_all_benches.sh first", file=sys.stderr)
         return 1
