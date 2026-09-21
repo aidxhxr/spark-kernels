@@ -167,7 +167,7 @@ src/kernels/       one .cu per kernel family, all variants inside
 src/bench/         one bench binary per kernel, JSON-lines output
 python/            PyTorch C++ extension and package
 tests/             pytest parity tests for every variant
-scripts/           run_all.sh, bench runner, torch comparison, results tables, roofline, ncu
+scripts/           run_all.sh, bench runner, torch comparison, results tables, roofline, ncu, gpu_env.sh
 docs/              hardware sheets (RTX5090.md, GB10.md), design notes, generated results
 ```
 

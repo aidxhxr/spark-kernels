@@ -6,7 +6,7 @@ ARCH  ?= 120
 CXX_SOURCES = $(shell find include src python/csrc -type f \
 	\( -name '*.cu' -o -name '*.cuh' -o -name '*.h' -o -name '*.hpp' -o -name '*.cpp' \))
 
-.PHONY: all help configure build bench python test lint format ncu results clean
+.PHONY: all help configure build bench python test lint format ncu results env clean
 
 all: build
 
@@ -20,6 +20,7 @@ help:
 	@echo "lint       ruff + clang-format --dry-run, same checks as CI"
 	@echo "format     clang-format -i on all C++/CUDA sources"
 	@echo "ncu        Nsight Compute reports for hgemm and rmsnorm"
+	@echo "env        GPU state that matters for a run: clocks, P-state, power limit, throttling, display"
 	@echo "clean      remove build outputs"
 
 configure:
@@ -47,6 +48,9 @@ lint:
 
 format:
 	clang-format -i $(CXX_SOURCES)
+
+env:
+	@./scripts/gpu_env.sh
 
 ncu: build
 	./scripts/profile_ncu.sh $(BUILD)

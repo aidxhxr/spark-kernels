@@ -19,10 +19,11 @@ done
 
 step() { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 
-step "toolchain"
+step "toolchain + GPU state (kept in results/env.txt)"
 nvcc --version | tail -1
-nvidia-smi --query-gpu=name,driver_version,compute_cap,power.limit --format=csv,noheader || true
 cmake --version | head -1
+mkdir -p results
+./scripts/gpu_env.sh | tee results/env.txt
 
 step "build (sm_$ARCH)"
 make build "ARCH=$ARCH"
@@ -51,4 +52,4 @@ if [ "$SKIP_NCU" -eq 0 ]; then
 fi
 
 step "done"
-echo "Next: paste results/headline.md into README.md, commit results/roofline.png, fill the tables in docs/design/*.md."
+echo "Next: paste results/headline.md into README.md, commit results/roofline.png and results/env.txt, fill the tables in docs/design/*.md."
