@@ -104,6 +104,17 @@ def load_bench_rows(results_dir: Path) -> list[dict]:
     return rows
 
 
+def row_shape(rows: int, cols: int) -> str:
+    """Shape string of the row-wise kernels, as the C++ benches write it."""
+    return f"{rows}x{cols}"
+
+
+def gemm_shape(M: int, N: int, K: int) -> str:
+    """Shape string of an (M x K) @ (K x N) GEMM, as bench_sgemm / bench_hgemm write it. The
+    results table joins the torch comparison on this string, so both sides must agree."""
+    return f"{M}x{N}x{K}"
+
+
 def ints_in(s: str) -> list[int]:
     return [int(t) for t in re.findall(r"\d+", s)]
 

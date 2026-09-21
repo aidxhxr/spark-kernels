@@ -16,6 +16,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shape_utils import gemm_shape, row_shape  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "results" / "torch_comparison.json"
 
@@ -52,7 +55,7 @@ def bench_row_ops(sk, add, dtype, rows, cols):
     isz = torch.tensor([], dtype=dtype).element_size()
     x = torch.randn(rows, cols, device=dev, dtype=dtype)
     w = torch.ones(cols, device=dev, dtype=dtype)
-    shape = f"{rows}x{cols}"
+    shape = row_shape(rows, cols)
 
     def gbps(n_in, n_out, ms):
         return bytes_rowop(rows, cols, isz, n_in, n_out) / ms / 1e6
@@ -85,7 +88,7 @@ def bench_row_ops(sk, add, dtype, rows, cols):
 
 def bench_gemms(sk, add, M, N, K):
     dev = "cuda"
-    shape = f"M{M}_N{N}_K{K}"
+    shape = gemm_shape(M, N, K)
     flops = 2.0 * M * N * K
     a = torch.randn(M, K, device=dev)
     b = torch.randn(K, N, device=dev)

@@ -27,6 +27,15 @@ def test_parse_shape(kernel, shape, expected):
     assert su.parse_shape(kernel, shape) == expected
 
 
+def test_shape_strings_match_the_cpp_benches_and_round_trip():
+    # bench_sgemm.cu / bench_hgemm.cu: M x N x K; the row-wise benches: rows x cols
+    assert su.gemm_shape(4096, 11008, 4096) == "4096x11008x4096"
+    assert su.parse_shape("hgemm", su.gemm_shape(4096, 11008, 2048)) == {
+        "M": 4096, "N": 11008, "K": 2048}
+    assert su.row_shape(4096, 14336) == "4096x14336"
+    assert su.parse_shape("swiglu", su.row_shape(4096, 14336)) == {"rows": 4096, "cols": 14336}
+
+
 def test_traffic_bytes_counts_every_pass():
     dims = {"rows": 4096, "cols": 8192}
     elems = 4096 * 8192
