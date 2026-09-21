@@ -3,6 +3,7 @@ because the results table joins the two on (kernel, dtype, shape)."""
 
 import re
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -29,3 +30,16 @@ def test_gemm_shapes_match_the_cpp_defaults():
                           ("bench_hgemm", bench_torch.HGEMM_SHAPES)):
         flat = ints_after(bench, r"shapes =")
         assert [tuple(flat[i:i + 3]) for i in range(0, len(flat), 3)] == shapes
+
+
+def test_clock_ramp_spins_once_for_the_whole_process(monkeypatch):
+    monkeypatch.setattr(bench_torch.torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(bench_torch, "RAMP_MS", 20)
+    monkeypatch.setattr(bench_torch, "_ramped", False)
+    calls = []
+    t0 = time.perf_counter()
+    bench_torch.ramp_clocks(lambda: calls.append(1))
+    assert (time.perf_counter() - t0) * 1e3 >= 20 and calls
+    n = len(calls)
+    bench_torch.ramp_clocks(lambda: calls.append(1))  # later ops are not ramped again
+    assert len(calls) == n

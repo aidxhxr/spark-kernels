@@ -11,6 +11,7 @@ import argparse
 import json
 import statistics
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -36,10 +37,29 @@ HGEMM_SHAPES = [(1024, 1024, 1024), (2048, 2048, 2048), (4096, 4096, 4096), (819
 WARMUP, ITERS = 10, 100
 
 
+RAMP_MS = 300  # kRampMs in src/bench/bench_common.hpp
+_ramped = False
+
+
+def ramp_clocks(fn) -> None:
+    """Spin the first op of the process for RAMP_MS, once, like the C++ harness: the RTX 5090
+    idles at low clocks, and the first row would otherwise be timed while it is still ramping."""
+    global _ramped
+    if _ramped:
+        return
+    _ramped = True
+    t0 = time.perf_counter()
+    while (time.perf_counter() - t0) * 1e3 < RAMP_MS:
+        fn()
+        torch.cuda.synchronize()
+
+
 def time_ms(fn, warmup=None, iters=None) -> float:
     # read the globals at call time so --warmup/--iters apply to every call site
     warmup = WARMUP if warmup is None else warmup
     iters = ITERS if iters is None else iters
+    if warmup > 0:  # --warmup=0 also skips the ramp, as in the C++ benches
+        ramp_clocks(fn)
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -140,7 +160,8 @@ def main() -> int:
     ap.add_argument("--iters", type=positive_int, default=ITERS,
                     help="timed iterations per op (default: %(default)s, same as the C++ benches)")
     ap.add_argument("--warmup", type=non_negative_int, default=WARMUP,
-                    help="untimed iterations before each measurement (default: %(default)s)")
+                    help="untimed iterations before each measurement (default: %(default)s); "
+                         "0 also skips the one-time clock ramp")
     args = ap.parse_args()
     WARMUP, ITERS = args.warmup, args.iters
     if not torch.cuda.is_available():
