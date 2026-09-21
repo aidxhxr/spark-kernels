@@ -108,6 +108,18 @@ def ints_in(s: str) -> list[int]:
     return [int(t) for t in re.findall(r"\d+", s)]
 
 
+BINARY_SUFFIX = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30}
+
+
+def element_count(shape: str) -> int:
+    """Element count of a 1-D shape string. bench_bandwidth abbreviates it in binary units
+    ("n=256M" is 256 << 20 elements); a plain "n=268435456" is taken as is."""
+    m = re.search(r"(\d+)([KMG])?(?![A-Za-z0-9])", shape)
+    if not m:
+        return 0
+    return int(m.group(1)) * BINARY_SUFFIX.get(m.group(2), 1)
+
+
 def parse_shape(kernel: str, shape: str) -> dict:
     """Interpret a shape string by kernel family.
 
@@ -127,7 +139,7 @@ def parse_shape(kernel: str, shape: str) -> dict:
         if len(v) == 1:
             return {"rows": 1, "cols": v[0]}
     if k == "bandwidth":
-        return {"n": v[0] if v else 0}
+        return {"n": element_count(shape)}
     return {"raw": v}
 
 

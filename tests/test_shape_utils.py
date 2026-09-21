@@ -18,6 +18,8 @@ import shape_utils as su  # noqa: E402
         ("softmax", "rows16_cols4096", {"rows": 16, "cols": 4096}),
         ("swiglu", "14336", {"rows": 1, "cols": 14336}),
         ("bandwidth", "n=268435456", {"n": 268435456}),
+        ("bandwidth", "n=256M", {"n": 256 << 20}),  # what bench_bandwidth.cu writes
+        ("bandwidth", "n=64M", {"n": 64 << 20}),
         ("bandwidth", "", {"n": 0}),
     ],
 )

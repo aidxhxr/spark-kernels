@@ -15,6 +15,8 @@ def test_bandwidth_copy_is_plotted_on_the_dram_roof_scale():
     assert roofline.plot_intensity(r) == 1.0  # not 0, which the plot would drop
     # at 1 FLOP/byte the height is bytes/s, so it compares directly against the bandwidth roof
     assert roofline.achieved_tflops(r) * 1e12 == pytest.approx(2 * 2**30 / 10e-3)
+    # same point from the abbreviated shape the bench writes
+    assert roofline.achieved_tflops({**r, "shape": "n=256M"}) == roofline.achieved_tflops(r)
 
 
 def test_compute_kernels_use_their_arithmetic_intensity():
