@@ -22,8 +22,17 @@ from shape_utils import gemm_shape, row_shape  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "results" / "torch_comparison.json"
 
-ROW_SHAPES = [(4096, 1024), (4096, 4096), (4096, 8192), (4096, 11008), (16384, 4096)]
-GEMM_SHAPES = [(1024, 1024, 1024), (2048, 2048, 2048), (4096, 4096, 4096), (4096, 11008, 4096)]
+# Same default shapes as the C++ benches (src/bench/bench_*.cu): the results table joins the two
+# on (kernel, dtype, shape), so a shape that is only timed here never shows up.
+ROWS = 4096
+RMSNORM_COLS = [1024, 2048, 4096, 8192]  # also add_rmsnorm
+SOFTMAX_COLS = [128, 1024, 4096, 16384]
+SWIGLU_COLS = [2048, 5632, 11008, 14336]
+# (M, N, K): C = A(MxK) @ B(KxN)
+SGEMM_SHAPES = [(512, 512, 512), (1024, 1024, 1024), (2048, 2048, 2048), (4096, 4096, 4096),
+                (4096, 4096, 11008), (4096, 11008, 4096)]
+HGEMM_SHAPES = [(1024, 1024, 1024), (2048, 2048, 2048), (4096, 4096, 4096), (8192, 8192, 8192),
+                (4096, 4096, 11008), (4096, 11008, 4096)]
 WARMUP, ITERS = 10, 100
 
 
@@ -45,36 +54,27 @@ def time_ms(fn, warmup=None, iters=None) -> float:
     return statistics.median(samples)
 
 
-def bytes_rowop(rows, cols, itemsize, n_in, n_out):
-    return rows * cols * itemsize * (n_in + n_out)
+def dtype_name(dtype) -> str:
+    return "f32" if dtype == torch.float32 else "bf16"
 
 
-def bench_row_ops(sk, add, dtype, rows, cols):
-    dev = "cuda"
-    dname = "f32" if dtype == torch.float32 else "bf16"
+def row_gbps(rows, cols, dtype, passes, ms) -> float:
+    """Achieved GB/s for `passes` full reads/writes of a rows x cols tensor in `ms`."""
     isz = torch.tensor([], dtype=dtype).element_size()
-    x = torch.randn(rows, cols, device=dev, dtype=dtype)
-    w = torch.ones(cols, device=dev, dtype=dtype)
-    shape = row_shape(rows, cols)
+    return rows * cols * isz * passes / ms / 1e6
 
-    def gbps(n_in, n_out, ms):
-        return bytes_rowop(rows, cols, isz, n_in, n_out) / ms / 1e6
+
+def bench_rmsnorm(sk, add, dtype, rows, cols):
+    x = torch.randn(rows, cols, device="cuda", dtype=dtype)
+    w = torch.ones(cols, device="cuda", dtype=dtype)
+    shape = row_shape(rows, cols)
 
     ours = time_ms(lambda: sk.rmsnorm(x, w))
     ref = time_ms(lambda: F.rms_norm(x, (cols,), w, 1e-6))
-    add("rmsnorm", dname, shape, ours, ref, gbps=gbps(1, 1, ours))
-
-    ours = time_ms(lambda: sk.softmax(x))
-    ref = time_ms(lambda: torch.softmax(x, dim=-1))
-    add("softmax", dname, shape, ours, ref, gbps=gbps(1, 1, ours))
-
-    up = torch.randn(rows, cols, device=dev, dtype=dtype)
-    ours = time_ms(lambda: sk.swiglu(x, up))
-    ref = time_ms(lambda: F.silu(x) * up)
-    add("swiglu", dname, shape, ours, ref, gbps=gbps(2, 1, ours))
+    add("rmsnorm", dtype_name(dtype), shape, ours, ref, gbps=row_gbps(rows, cols, dtype, 2, ours))
 
     if dtype == torch.bfloat16:
-        resid = torch.randn(rows, cols, device=dev, dtype=dtype)
+        resid = torch.randn(rows, cols, device="cuda", dtype=dtype)
         ours = time_ms(lambda: sk.add_rmsnorm_(x, resid, w))
 
         def unfused():
@@ -83,23 +83,41 @@ def bench_row_ops(sk, add, dtype, rows, cols):
 
         ref = time_ms(unfused)
         # traffic: read x, read+write resid, write out = 4 passes
-        add("add_rmsnorm", dname, shape, ours, ref, gbps=gbps(3, 1, ours))
+        add("add_rmsnorm", "bf16", shape, ours, ref, gbps=row_gbps(rows, cols, dtype, 4, ours))
 
 
-def bench_gemms(sk, add, M, N, K):
-    dev = "cuda"
-    shape = gemm_shape(M, N, K)
-    flops = 2.0 * M * N * K
-    a = torch.randn(M, K, device=dev)
-    b = torch.randn(K, N, device=dev)
+def bench_softmax(sk, add, dtype, rows, cols):
+    x = torch.randn(rows, cols, device="cuda", dtype=dtype)
+    ours = time_ms(lambda: sk.softmax(x))
+    ref = time_ms(lambda: torch.softmax(x, dim=-1))
+    add("softmax", dtype_name(dtype), row_shape(rows, cols), ours, ref,
+        gbps=row_gbps(rows, cols, dtype, 2, ours))
+
+
+def bench_swiglu(sk, add, dtype, rows, cols):
+    gate = torch.randn(rows, cols, device="cuda", dtype=dtype)
+    up = torch.randn(rows, cols, device="cuda", dtype=dtype)
+    ours = time_ms(lambda: sk.swiglu(gate, up))
+    ref = time_ms(lambda: F.silu(gate) * up)
+    # traffic: read gate, read up, write out = 3 passes
+    add("swiglu", dtype_name(dtype), row_shape(rows, cols), ours, ref,
+        gbps=row_gbps(rows, cols, dtype, 3, ours))
+
+
+def bench_sgemm(sk, add, M, N, K):
+    a = torch.randn(M, K, device="cuda")
+    b = torch.randn(K, N, device="cuda")
     ours = time_ms(lambda: sk.sgemm(a, b))
     ref = time_ms(lambda: a @ b)
-    add("sgemm", "f32", shape, ours, ref, tflops=flops / ours / 1e9)
+    add("sgemm", "f32", gemm_shape(M, N, K), ours, ref, tflops=2.0 * M * N * K / ours / 1e9)
 
-    ah, bh = a.to(torch.bfloat16), b.to(torch.bfloat16)
-    ours = time_ms(lambda: sk.hgemm(ah, bh))
-    ref = time_ms(lambda: ah @ bh)
-    add("hgemm", "bf16", shape, ours, ref, tflops=flops / ours / 1e9)
+
+def bench_hgemm(sk, add, M, N, K):
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
+    ours = time_ms(lambda: sk.hgemm(a, b))
+    ref = time_ms(lambda: a @ b)
+    add("hgemm", "bf16", gemm_shape(M, N, K), ours, ref, tflops=2.0 * M * N * K / ours / 1e9)
 
 
 def positive_int(text: str) -> int:
@@ -156,10 +174,16 @@ def main() -> int:
         )
 
     for dtype in (torch.float32, torch.bfloat16):
-        for rows, cols in ROW_SHAPES:
-            bench_row_ops(sk, add, dtype, rows, cols)
-    for M, N, K in GEMM_SHAPES:
-        bench_gemms(sk, add, M, N, K)
+        for cols in RMSNORM_COLS:
+            bench_rmsnorm(sk, add, dtype, ROWS, cols)
+        for cols in SOFTMAX_COLS:
+            bench_softmax(sk, add, dtype, ROWS, cols)
+        for cols in SWIGLU_COLS:
+            bench_swiglu(sk, add, dtype, ROWS, cols)
+    for M, N, K in SGEMM_SHAPES:
+        bench_sgemm(sk, add, M, N, K)
+    for M, N, K in HGEMM_SHAPES:
+        bench_hgemm(sk, add, M, N, K)
 
     OUT.parent.mkdir(exist_ok=True)
     with OUT.open("w") as f:
