@@ -58,3 +58,20 @@ def test_hgemm_rows_are_reported_in_tflops(results):
     assert "## hgemm\n" in md and "TFLOPS" in md and "% of cuBLAS" in md
     assert "| hgemm | bf16 | 4096x4096x4096 | v2 | 0.5000 | 274.9 TFLOPS | — | 80.0% |" in (
         out / "headline.md").read_text()
+
+
+def test_torch_rows_from_another_machine_are_ignored(results, capsys):
+    out, write = results
+    shape = "4096x8192"
+    write("rmsnorm.json", [bench_row("rmsnorm", "bf16", 3, shape, 0.1, gbps=1300.0)])
+    torch_row = {"kernel": "rmsnorm", "dtype": "bf16", "shape": shape, "speedup": 3.21}
+
+    write("torch_comparison.json", [{**torch_row, "device": "NVIDIA GB10"}])
+    assert mrt.main() == 0
+    assert "3.21×" not in (out / "RESULTS.md").read_text()
+    assert "not measured on the RTX 5090" in capsys.readouterr().err
+
+    write("torch_comparison.json", [{**torch_row, "device": DEVICE}])
+    assert mrt.main() == 0
+    assert "3.21×" in (out / "RESULTS.md").read_text()
+    assert "| 3.21× |" in (out / "headline.md").read_text()

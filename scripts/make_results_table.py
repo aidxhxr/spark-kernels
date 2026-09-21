@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shape_utils import (  # noqa: E402
     TORCH_COMPARISON,
     arithmetic_intensity,
+    device_key,
     is_compute_bound_kernel,
     is_reference,
     load_bench_rows,
@@ -30,11 +31,25 @@ SHEETS = {"RTX 5090": "RTX5090.md", "GB10": "GB10.md"}
 KERNEL_ORDER = ["bandwidth", "rmsnorm", "add_rmsnorm", "swiglu", "softmax", "sgemm", "hgemm"]
 
 
-def load_torch_rows() -> dict[tuple, dict]:
+def on_device(r: dict, device: str) -> bool:
+    try:
+        return device_key(r.get("device")) == device
+    except ValueError:  # a device without peaks is certainly not this one
+        return False
+
+
+def load_torch_rows(device: str) -> dict[tuple, dict]:
+    """Torch comparison rows keyed for the join, only those measured on `device`: a
+    torch_comparison.json left over from the other machine must not end up next to these rows."""
     p = RESULTS / TORCH_COMPARISON
     if not p.exists():
         return {}
-    return {(r["kernel"], r["dtype"], r["shape"]): r for r in load_jsonl(p)}
+    rows = load_jsonl(p)
+    kept = [r for r in rows if on_device(r, device)]
+    if len(kept) < len(rows):
+        print(f"ignoring {len(rows) - len(kept)} rows of {p.name} that were not measured on the "
+              f"{device}; rerun scripts/bench_torch.py on this machine", file=sys.stderr)
+    return {(r["kernel"], r["dtype"], r["shape"]): r for r in kept}
 
 
 def shape_size(kernel: str, shape: str) -> float:
@@ -160,7 +175,7 @@ def main() -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
-    torch_rows = load_torch_rows()
+    torch_rows = load_torch_rows(device)
     by_kernel: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_kernel[r["kernel"]].append(r)
