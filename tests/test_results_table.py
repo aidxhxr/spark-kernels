@@ -75,3 +75,16 @@ def test_torch_rows_from_another_machine_are_ignored(results, capsys):
     assert mrt.main() == 0
     assert "3.21×" in (out / "RESULTS.md").read_text()
     assert "| 3.21× |" in (out / "headline.md").read_text()
+
+
+def test_the_copy_is_not_given_an_arithmetic_intensity(results):
+    out, write = results
+    write("bandwidth.json", [
+        bench_row("cudaMemcpy_d2d", "f32", -1, "n=256M", 1.5, gbps=1431.0, ref_ms=1.5),
+        bench_row("bandwidth_copy", "f32", 2, "n=256M", 1.6, gbps=1342.0, ref_ms=1.5),
+    ])
+    assert mrt.main() == 0
+    md = (out / "RESULTS.md").read_text()
+    assert "0.00 FLOP/byte" not in md and "a pure copy" in md
+    assert "| f32 | n=256M | cudaMemcpy | 1.5000 |" in md
+    assert "| bandwidth | f32 | n=256M | v2 |" in (out / "headline.md").read_text()

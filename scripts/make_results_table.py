@@ -199,8 +199,13 @@ def main() -> int:
         ai_examples = sorted({(r["dtype"], r["shape"]) for r in krows}, key=lambda x: x[1])[:1]
         if ai_examples and not is_compute_bound_kernel(kernel):
             d, s = ai_examples[0]
-            md.append(f"Arithmetic intensity ≈ {arithmetic_intensity(kernel, d, s):.2f} FLOP/byte "
-                      f"({d}, {s}) — memory-bound; the ceiling is DRAM bandwidth.")
+            ai = arithmetic_intensity(kernel, d, s)
+            if ai > 0:
+                md.append(f"Arithmetic intensity ≈ {ai:.2f} FLOP/byte "
+                          f"({d}, {s}) — memory-bound; the ceiling is DRAM bandwidth.")
+            else:  # the bandwidth copy
+                md.append("No arithmetic: a pure copy, so GB/s here is the realistic DRAM roof "
+                          "for the row-wise kernels below.")
             md.append("")
         md += [table_for(kernel, krows, torch_rows, peaks), ""]
     OUT_MD.parent.mkdir(exist_ok=True)
