@@ -26,6 +26,10 @@ ITEMSIZE = {"f32": 4, "bf16": 2, "fp32": 4, "float32": 4, "bfloat16": 2}
 
 TORCH_COMPARISON = "torch_comparison.json"
 
+# The C++ benches name some rows after the entry point they time rather than the kernel family
+# everything here keys on (tables, peaks, traffic, FLOPs, the torch comparison).
+KERNEL_ALIASES = {"hgemm_bf16": "hgemm", "bandwidth_copy": "bandwidth"}
+
 
 def load_jsonl(path: Path) -> list[dict]:
     """Read one JSON object per line, ignoring anything that is not a JSON row."""
@@ -68,12 +72,20 @@ def peaks_for_rows(rows: list[dict], bf16_peak: float | None = None) -> tuple[st
     return key, peaks
 
 
+def normalize_row(r: dict) -> dict:
+    """A bench row with its kernel renamed to the family name (see KERNEL_ALIASES)."""
+    kernel = r.get("kernel")
+    if kernel in KERNEL_ALIASES:
+        r = {**r, "kernel": KERNEL_ALIASES[kernel]}
+    return r
+
+
 def load_bench_rows(results_dir: Path) -> list[dict]:
     """Every row written by the C++ benches (results/*.json minus the torch comparison)."""
     rows: list[dict] = []
     for p in sorted(results_dir.glob("*.json")):
         if p.name != TORCH_COMPARISON:
-            rows.extend(load_jsonl(p))
+            rows.extend(normalize_row(r) for r in load_jsonl(p))
     return rows
 
 

@@ -72,6 +72,18 @@ def test_load_bench_rows_skips_noise_and_torch_comparison(tmp_path):
     assert [r["variant"] for r in rows] == [0, 1]
 
 
+def test_bench_entry_point_names_map_to_kernel_families(tmp_path):
+    # the names bench_hgemm.cu and bench_bandwidth.cu actually write
+    (tmp_path / "hgemm.json").write_text('{"kernel":"hgemm_bf16","variant":2}\n')
+    (tmp_path / "bandwidth.json").write_text('{"kernel":"bandwidth_copy","variant":0}\n')
+    (tmp_path / "rmsnorm.json").write_text('{"kernel":"rmsnorm","variant":1}\n')
+    rows = su.load_bench_rows(tmp_path)
+    assert sorted(r["kernel"] for r in rows) == ["bandwidth", "hgemm", "rmsnorm"]
+    for r in rows:
+        if r["kernel"] == "hgemm":
+            assert su.is_compute_bound_kernel(r["kernel"])
+
+
 def test_device_key_and_peaks_selection():
     assert su.device_key("NVIDIA GeForce RTX 5090") == "RTX 5090"
     assert su.device_key("NVIDIA GB10") == "GB10"
