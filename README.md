@@ -91,13 +91,14 @@ differ.
 
 Requirements: CUDA 13.0+, CMake 3.24+, x86_64 Linux for the 5090 (WSL2 should work; native
 Windows is untested because the Makefile and scripts assume bash), and for the Python bindings
-a CUDA 13 PyTorch build (2.7 or newer) with `sm_120` support.
+a CUDA 13 PyTorch build: 2.9 or newer, the first release with `cu130` wheels (`pyproject.toml`
+pins `torch>=2.9`).
 
 ```bash
 git clone https://github.com/aidxhxr/spark-kernels && cd spark-kernels
 
 make build            # cmake configure + build, arch 120 (ARCH=121 for the Spark, ARCH="120;121" for both)
-make bench            # runs every bench_* binary, writes results/*.json
+make bench            # runs every bench_* binary, writes results/*.json + env.txt (GPU state)
 make results          # docs/RESULTS.md + results/roofline.png + results/headline.md
 
 pip install -e . --no-build-isolation   # PyTorch extension, sm_120 unless TORCH_CUDA_ARCH_LIST is set ("12.1" for the Spark)
