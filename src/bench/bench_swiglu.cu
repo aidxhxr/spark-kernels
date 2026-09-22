@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
 
         std::vector<std::pair<int64_t, std::string>> shapes;
         if (args.has("n")) {
-            const int64_t n = std::atoll(args.get("n", "0").c_str());
+            const int64_t n = args.geti64("n", 0);
             shapes.emplace_back(n, "n=" + std::to_string(n));
         } else {
             const int rows = 4096;

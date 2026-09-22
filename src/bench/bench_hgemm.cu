@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -133,7 +134,7 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     spark::bench::Args args(argc, argv);
     spark::bench::print_device_banner();
 
@@ -169,4 +170,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "bench_hgemm: %s\n", e.what());
+        return 2;
+    }
 }

@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -220,7 +221,7 @@ bool bench_add_rmsnorm(int rows, int cols, int iters, cudaStream_t stream) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     Args args(argc, argv);
     const int rows = args.geti("rows", 4096);
     const int iters = args.geti("iters", 100);
@@ -234,15 +235,10 @@ int main(int argc, char** argv) {
     SPARK_CUDA_CHECK(cudaStreamCreate(&stream));
 
     bool ok = true;
-    try {
-        for (int cols : col_list) ok = bench_rmsnorm_dtype<float>(rows, cols, iters, stream) && ok;
-        for (int cols : col_list)
-            ok = bench_rmsnorm_dtype<__nv_bfloat16>(rows, cols, iters, stream) && ok;
-        for (int cols : col_list) ok = bench_add_rmsnorm(rows, cols, iters, stream) && ok;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "bench_rmsnorm: %s\n", e.what());
-        return 1;
-    }
+    for (int cols : col_list) ok = bench_rmsnorm_dtype<float>(rows, cols, iters, stream) && ok;
+    for (int cols : col_list)
+        ok = bench_rmsnorm_dtype<__nv_bfloat16>(rows, cols, iters, stream) && ok;
+    for (int cols : col_list) ok = bench_add_rmsnorm(rows, cols, iters, stream) && ok;
 
     SPARK_CUDA_CHECK(cudaStreamDestroy(stream));
     if (!ok) {
@@ -251,4 +247,13 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr, "bench_rmsnorm: all variants validated\n");
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "bench_rmsnorm: %s\n", e.what());
+        return 2;
+    }
 }

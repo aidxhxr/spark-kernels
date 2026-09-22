@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -60,8 +61,7 @@ struct Timing {
 // Times `fn` (which must enqueue work on `stream`) and returns the median wall time.
 inline Timing time_kernel(const std::function<void()>& fn, cudaStream_t stream, int warmup = 10,
                           int iters = 100) {
-    // A bad --iters (0, negative, or non-numeric, which atoi maps to 0) would otherwise index
-    // an empty sample vector below.
+    // --iters=0 or a negative count would otherwise index an empty sample vector below.
     SPARK_REQUIRE(iters > 0, "time_kernel: iters must be >= 1");
     if (config().warmup >= 0) warmup = config().warmup;
     if (warmup > 0) ramp_clocks(fn, stream);
@@ -150,7 +150,9 @@ inline void print_row(const Row& r) {
     std::fflush(stdout);
 }
 
-// Simple "--key=value" argument parser.
+// Simple "--key=value" argument parser. Values are parsed strictly: "--iters=1O" (letter O)
+// or "--n=1G" throw std::invalid_argument instead of silently becoming 1 or 0 the way atoi
+// would, since a typo here would otherwise produce a results file full of wrong rows.
 struct Args {
     std::vector<std::pair<std::string, std::string>> kv;
     Args(int argc, char** argv) {
@@ -172,8 +174,20 @@ struct Args {
             if (p.first == k) return p.second;
         return def;
     }
+    int64_t geti64(const std::string& k, int64_t def) const {
+        if (!has(k)) return def;
+        const std::string v = get(k, "");
+        char* end = nullptr;
+        errno = 0;
+        const long long parsed = std::strtoll(v.c_str(), &end, 10);
+        SPARK_REQUIRE(!v.empty() && end != nullptr && *end == '\0' && errno == 0,
+                      "--" + k + "=" + v + ": expected an integer");
+        return static_cast<int64_t>(parsed);
+    }
     int geti(const std::string& k, int def) const {
-        return std::atoi(get(k, std::to_string(def)).c_str());
+        const int64_t v = geti64(k, def);
+        SPARK_REQUIRE(v >= INT32_MIN && v <= INT32_MAX, "--" + k + ": value does not fit in int");
+        return static_cast<int>(v);
     }
     bool has(const std::string& k) const {
         for (auto& p : kv)

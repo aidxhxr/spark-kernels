@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         const int iters = args.geti("iters", 50);
         std::vector<int64_t> sizes;
         if (args.has("n")) {
-            sizes.push_back(std::atoll(args.get("n", "0").c_str()));
+            sizes.push_back(args.geti64("n", 0));
         } else {
             sizes.push_back(int64_t{64} << 20);   // 64M floats  = 256 MiB per buffer
             sizes.push_back(int64_t{256} << 20);  // 256M floats = 1 GiB per buffer

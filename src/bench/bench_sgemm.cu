@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -51,7 +52,7 @@ double tflops_of(const Shape& s, double ms) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     using namespace spark::bench;
     Args args(argc, argv);
     print_device_banner();
@@ -176,4 +177,13 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr, "all variants match cuBLAS\n");
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "bench_sgemm: %s\n", e.what());
+        return 2;
+    }
 }
