@@ -24,8 +24,10 @@ results/*.csv
 results/ncu_*.txt
 results/headline.md
 !results/.gitkeep
-# the roofline is the one output the README links to, so it is committed after a run
+# the roofline is the one output the README links to, so it is committed after a run, and
+# env.txt (the GPU state it was measured in) goes with it
 !results/roofline.png
+!results/env.txt
 
 # editors / OS
 .vscode/

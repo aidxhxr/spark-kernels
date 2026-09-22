@@ -13,7 +13,7 @@ all: build
 help:
 	@echo "configure  cmake configure only, for sm_$(ARCH) into $(BUILD)/ (ARCH=121 for the DGX Spark)"
 	@echo "build      cmake configure + build for sm_$(ARCH) into $(BUILD)/"
-	@echo "bench      run every bench_* binary, write results/*.json"
+	@echo "bench      run every bench_* binary, write results/*.json and results/env.txt (GPU state)"
 	@echo "results    docs/RESULTS.md, results/headline.md, results/roofline.png"
 	@echo "python     pip install -e . (PyTorch extension)"
 	@echo "test       install the extension, then pytest parity tests for every variant"

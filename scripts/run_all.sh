@@ -19,16 +19,14 @@ done
 
 step() { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 
-step "toolchain + GPU state (kept in results/env.txt)"
+step "toolchain"
 nvcc --version | tail -1
 cmake --version | head -1
-mkdir -p results
-./scripts/gpu_env.sh | tee results/env.txt
 
 step "build (sm_$ARCH)"
 make build "ARCH=$ARCH"
 
-step "benchmarks (also validates every variant against cuBLAS / CPU reference)"
+step "benchmarks (also validates every variant against cuBLAS / CPU reference; GPU state -> results/env.txt)"
 make bench
 
 step "results tables + roofline"
