@@ -45,9 +45,8 @@ ext = CUDAExtension(
     extra_compile_args={"cxx": ["-O3", "-std=c++17"], "nvcc": nvcc_flags},
 )
 
+# name, version and the rest of the metadata come from the [project] table in pyproject.toml.
 setup(
-    name="spark-kernels",
-    version="0.1.0",
     packages=["spark_kernels"],
     package_dir={"": "python"},
     ext_modules=[ext],

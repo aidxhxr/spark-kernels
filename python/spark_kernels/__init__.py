@@ -17,6 +17,8 @@ the fastest one that accepts the input (see ops.py for the two ladders where tha
 top rung). `spark_kernels.reference` holds plain-PyTorch implementations used by tests.
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 from . import reference
 from .ops import (
     add_rmsnorm_,
@@ -38,4 +40,8 @@ __all__ = [
     "softmax",
     "swiglu",
 ]
-__version__ = "0.1.0"
+
+try:
+    __version__ = version("spark-kernels")  # the one copy lives in pyproject.toml
+except PackageNotFoundError:  # imported from a checkout that was never pip-installed
+    __version__ = "0.0.0+unknown"
