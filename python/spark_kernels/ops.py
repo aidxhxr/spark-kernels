@@ -1,7 +1,14 @@
 """Thin Python wrappers over the compiled extension (spark_kernels._C).
 
-The C++ side flattens all leading dims of row-wise ops into `rows`; these wrappers only add
-argument checking with friendlier messages and keep the output shape equal to the input.
+All validation and dispatch happens in python/csrc/bindings.cpp: row-wise ops flatten every
+leading dim into `rows`, and the output always has the input's shape and dtype. These wrappers
+exist for the docstrings and type hints.
+
+`variant=-1` (the default) runs the fastest implementation that accepts the input. Two
+ladders have a top rung with extra requirements, and there the default steps down one rung
+instead of failing: `swiglu` needs 16-byte aligned storage for its vectorized variant, and
+`hgemm` variant 2 needs M, N multiples of 128 and K a multiple of 32. An explicit variant is
+never substituted; it raises ValueError if it cannot take the input.
 """
 
 from __future__ import annotations
@@ -27,8 +34,9 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6, variant: int = 
         x: [..., cols] float32 or bfloat16 CUDA tensor (contiguous).
         w: [cols] weight, same dtype as x.
         eps: numerical epsilon inside the rsqrt.
-        variant: implementation index; -1 = fastest. Vectorized variants need cols % 4 == 0
-            (float32) or cols % 8 == 0 (bfloat16).
+        variant: implementation index; -1 = fastest (variant 3, which takes any cols).
+            Variant 2 needs cols % 4 == 0 (float32) or cols % 8 == 0 (bfloat16) and
+            16-byte aligned x, w and out.
     """
     return _C.rmsnorm(x, w, eps, variant)
 
@@ -45,7 +53,11 @@ def add_rmsnorm_(
 
 
 def swiglu(gate: torch.Tensor, up: torch.Tensor, variant: int = -1) -> torch.Tensor:
-    """silu(gate) * up, elementwise, fp32 math. Any shape; gate and up must match."""
+    """silu(gate) * up, elementwise, fp32 math. Any shape; gate and up must match.
+
+    Variant 1 (128-bit loads) needs gate, up and the output to be 16-byte aligned; the default
+    variant falls back to the scalar kernel on a tensor sliced to an odd storage offset.
+    """
     return _C.swiglu(gate, up, variant)
 
 
@@ -62,7 +74,7 @@ def sgemm(a: torch.Tensor, b: torch.Tensor, variant: int = -1) -> torch.Tensor:
 def hgemm(a: torch.Tensor, b: torch.Tensor, variant: int = -1) -> torch.Tensor:
     """bf16 tensor-core GEMM with fp32 accumulation: a[M,K] @ b[K,N] -> [M,N] (bf16).
 
-    Requires M, N, K multiples of 16; variant 2 additionally requires M, N multiples of 128
-    and K a multiple of 32.
+    Requires M, N, K multiples of 16. Variant 2 additionally requires M, N multiples of 128
+    and K a multiple of 32; the default variant uses variant 1 on shapes that do not qualify.
     """
     return _C.hgemm(a, b, variant)

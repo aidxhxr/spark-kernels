@@ -80,5 +80,8 @@ int sgemm_num_variants();
 void hgemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N,
                 int K, int variant, cudaStream_t stream);
 int hgemm_num_variants();
+// True if `variant` accepts this shape (the rules above); hgemm_bf16 throws when it is false.
+// Lets a caller pick the fastest variant that fits instead of catching the exception.
+bool hgemm_supports(int M, int N, int K, int variant);
 
 }  // namespace spark

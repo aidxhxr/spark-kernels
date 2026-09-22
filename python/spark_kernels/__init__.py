@@ -13,7 +13,8 @@ Ops (all run on the current CUDA stream, all accept float32 or bfloat16 unless n
     num_variants(name)                       how many implementations exist for `name`
 
 `variant` selects a rung on the optimization ladder described in docs/DESIGN.md; -1 picks
-the fastest. `spark_kernels.reference` holds plain-PyTorch implementations used by tests.
+the fastest one that accepts the input (see ops.py for the two ladders where that is not the
+top rung). `spark_kernels.reference` holds plain-PyTorch implementations used by tests.
 """
 
 from . import reference

@@ -34,3 +34,20 @@ def test_swiglu_shape_mismatch(sk):
     u = torch.randn(4, 128, device="cuda")
     with pytest.raises(RuntimeError):
         sk.swiglu(g, u)
+
+
+def _unaligned(n, dtype):
+    """A contiguous 1-D tensor whose storage starts 1 element past a 16-byte boundary."""
+    t = torch.randn(n + 1, device="cuda", dtype=dtype)[1:]
+    assert t.is_contiguous() and t.data_ptr() % 16 != 0
+    return t
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=dtype_id)
+def test_default_variant_takes_unaligned_storage(sk, dtype):
+    torch.manual_seed(0)
+    gate, up = _unaligned(1024, dtype), _unaligned(1024, dtype)
+    got = sk.swiglu(gate, up)  # falls back to the scalar variant
+    torch.testing.assert_close(got, sk.reference.swiglu(gate, up), **TOL[dtype])
+    with pytest.raises(ValueError):  # an explicit variant is never substituted
+        sk.swiglu(gate, up, 1)

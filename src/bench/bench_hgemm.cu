@@ -53,6 +53,11 @@ std::vector<float> to_host_f32(const __nv_bfloat16* d, size_t n) {
 // Runs one shape for one variant. Returns false on a correctness failure.
 bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int variant, int iters) {
     const int M = s.M, N = s.N, K = s.K;
+    if (!spark::hgemm_supports(M, N, K, variant)) {
+        std::fprintf(stderr, "  skip variant %d shape %dx%dx%d: shape not supported\n", variant, M,
+                     N, K);
+        return true;  // an unsupported shape is not a failure
+    }
     const size_t nA = static_cast<size_t>(M) * K, nB = static_cast<size_t>(K) * N,
                  nC = static_cast<size_t>(M) * N;
 
@@ -82,30 +87,17 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
     // Correctness. Tolerance: both outputs are fp32 accumulations rounded once to bf16
     // (relative step 2^-8 = 0.39%), so we allow 2% of max|ref| to cover a 1-ulp difference
     // on each side plus fp32 summation-order noise.
-    bool ok = true;
-    double max_abs_err = 0.0, max_rel_err = 0.0;
-    try {
-        spark::hgemm_bf16(dA, dB, dC, M, N, K, variant, stream);
-        SPARK_CUDA_CHECK(cudaStreamSynchronize(stream));
-        const auto got = to_host_f32(dC, nC);
-        const auto err = spark::bench::compare(got.data(), ref.data(), nC);
-        double max_ref = 0.0;
-        for (size_t i = 0; i < nC; ++i) max_ref = std::max(max_ref, std::fabs((double)ref[i]));
-        const double tol = 2e-2 * max_ref + 1e-3;
-        max_abs_err = err.max_abs;
-        max_rel_err = err.max_rel;
-        ok = err.max_abs <= tol;
-        if (!ok) {
-            std::fprintf(stderr, "  FAIL variant %d shape %dx%dx%d: max_abs=%.4e tol=%.4e\n",
-                         variant, M, N, K, err.max_abs, tol);
-        }
-    } catch (const std::invalid_argument& e) {
-        std::fprintf(stderr, "  skip variant %d shape %dx%dx%d: %s\n", variant, M, N, K, e.what());
-        cudaFree(dA);
-        cudaFree(dB);
-        cudaFree(dC);
-        cudaFree(dRef);
-        return true;  // unsupported shape is not a failure
+    spark::hgemm_bf16(dA, dB, dC, M, N, K, variant, stream);
+    SPARK_CUDA_CHECK(cudaStreamSynchronize(stream));
+    const auto got = to_host_f32(dC, nC);
+    const auto err = spark::bench::compare(got.data(), ref.data(), nC);
+    double max_ref = 0.0;
+    for (size_t i = 0; i < nC; ++i) max_ref = std::max(max_ref, std::fabs((double)ref[i]));
+    const double tol = 2e-2 * max_ref + 1e-3;
+    const bool ok = err.max_abs <= tol;
+    if (!ok) {
+        std::fprintf(stderr, "  FAIL variant %d shape %dx%dx%d: max_abs=%.4e tol=%.4e\n", variant,
+                     M, N, K, err.max_abs, tol);
     }
 
     // Timing.
@@ -125,8 +117,8 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
     row.tflops = flops / (t_us.median_ms * 1e-3) / 1e12;
     row.gbps = 0.0;
     row.ref_ms = t_ref.median_ms;
-    row.max_abs_err = max_abs_err;
-    row.max_rel_err = max_rel_err;
+    row.max_abs_err = err.max_abs;
+    row.max_rel_err = err.max_rel;
     row.ok = ok;
     spark::bench::print_row(row);
     std::fprintf(stderr, "    cuBLAS: %.2f TFLOPS | this kernel = %.1f%% of cuBLAS\n",

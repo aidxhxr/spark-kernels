@@ -1,11 +1,15 @@
 // PyTorch bindings for spark-kernels.
 //
 // Every op validates on the host and dispatches to the launchers declared in
-// include/spark/kernels.h on the current PyTorch CUDA stream. Shape/dtype problems raise
-// ValueError in Python (pybind11 translates std::invalid_argument); CUDA failures raise
-// RuntimeError.
+// include/spark/kernels.h on the current PyTorch CUDA stream. Problems caught by the
+// TORCH_CHECKs here raise RuntimeError in Python; the launchers' own std::invalid_argument
+// (an explicitly requested variant that cannot take the input) becomes ValueError; CUDA
+// failures raise RuntimeError.
 //
-// `variant = -1` means "the fastest variant", i.e. num_variants() - 1.
+// `variant = -1` means "the fastest variant that accepts this input". That is
+// num_variants() - 1 except where the top rung has requirements the rung below does not
+// (swiglu: 16-byte aligned storage; hgemm: whole 128x128x32 tiles), in which case the default
+// steps down one rung. An explicitly requested variant is never substituted.
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
@@ -39,6 +43,12 @@ int resolve_variant(int variant, int num) {
     if (variant < 0) return num - 1;
     TORCH_CHECK(variant < num, "variant ", variant, " out of range [0, ", num, ")");
     return variant;
+}
+
+// The vectorized kernels read 16 bytes per lane; a tensor whose storage offset is not a
+// multiple of 16 bytes (e.g. a slice of a flat buffer) cannot feed them.
+bool aligned16(const Tensor& t) {
+    return reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0;
 }
 
 // Row ops treat the last dim as the row; all leading dims are flattened.
@@ -115,7 +125,8 @@ Tensor swiglu(const Tensor& gate, const Tensor& up, int variant) {
     TORCH_CHECK(up.sizes() == gate.sizes(), "gate and up must have the same shape");
     const c10::cuda::CUDAGuard guard(gate.device());
     Tensor out = at::empty_like(gate);
-    const int v = resolve_variant(variant, spark::swiglu_num_variants());
+    int v = resolve_variant(variant, spark::swiglu_num_variants());
+    if (variant < 0 && !(aligned16(gate) && aligned16(up) && aligned16(out))) v = 0;
     cudaStream_t stream = current_stream(gate);
     const int64_t n = gate.numel();
     if (gate.scalar_type() == at::kFloat) {
@@ -177,7 +188,8 @@ Tensor hgemm(const Tensor& a, const Tensor& b, int variant) {
     const GemmShape s = gemm_shape(a, b);
     const c10::cuda::CUDAGuard guard(a.device());
     Tensor c = at::empty({s.M, s.N}, a.options());
-    const int v = resolve_variant(variant, spark::hgemm_num_variants());
+    int v = resolve_variant(variant, spark::hgemm_num_variants());
+    while (variant < 0 && v > 0 && !spark::hgemm_supports(s.M, s.N, s.K, v)) --v;
     spark::hgemm_bf16(bf16_ptr(a), bf16_ptr(b), bf16_ptr_mut(c), s.M, s.N, s.K, v,
                       current_stream(a));
     return c;

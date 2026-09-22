@@ -71,3 +71,15 @@ def test_sgemm_rejects_inner_mismatch(sk):
 
 def test_tolerance_dict_present():
     assert torch.float32 in TOL
+
+
+def test_hgemm_default_variant_takes_any_multiple_of_16(sk):
+    M, N, K = 272, 144, 48  # multiples of 16 but not of the 128x128x32 tile of variant 2
+    torch.manual_seed(0)
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
+    got = sk.hgemm(a, b)  # steps down to variant 1
+    ref = (a.float() @ b.float()).to(torch.bfloat16)
+    torch.testing.assert_close(got.float(), ref.float(), **HGEMM_TOL)
+    with pytest.raises(ValueError):  # an explicit variant is never substituted
+        sk.hgemm(a, b, 2)

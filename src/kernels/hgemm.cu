@@ -312,11 +312,19 @@ int hgemm_num_variants() {
     return 3;
 }
 
+bool hgemm_supports(int M, int N, int K, int variant) {
+    if (variant < 0 || variant >= hgemm_num_variants()) return false;
+    if (M <= 0 || N <= 0 || K <= 0) return false;
+    if (M % WMMA_M != 0 || N % WMMA_N != 0 || K % WMMA_K != 0) return false;
+    if (variant == 2) return M % BM == 0 && N % BN == 0 && K % BK == 0;
+    return true;
+}
+
 void hgemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N,
                 int K, int variant, cudaStream_t stream) {
     SPARK_REQUIRE(A != nullptr && B != nullptr && C != nullptr, "hgemm: null pointer");
     SPARK_REQUIRE(M > 0 && N > 0 && K > 0, "hgemm: M, N, K must be positive");
-    SPARK_REQUIRE(M % 16 == 0 && N % 16 == 0 && K % 16 == 0,
+    SPARK_REQUIRE(M % WMMA_M == 0 && N % WMMA_N == 0 && K % WMMA_K == 0,
                   "hgemm: M, N, K must be multiples of 16");
     SPARK_REQUIRE(variant >= 0 && variant < hgemm_num_variants(), "hgemm: unknown variant");
 
@@ -332,7 +340,7 @@ void hgemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C
             break;
         }
         case 2: {
-            SPARK_REQUIRE(M % BM == 0 && N % BN == 0 && K % BK == 0,
+            SPARK_REQUIRE(hgemm_supports(M, N, K, 2),
                           "hgemm variant 2: requires M % 128 == 0, N % 128 == 0, K % 32 == 0");
             const dim3 grid(N / BN, M / BM);
             hgemm_v2_kernel<<<grid, TILE_THREADS, 0, stream>>>(A, B, C, M, N, K);

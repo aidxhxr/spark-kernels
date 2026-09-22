@@ -64,3 +64,17 @@ def test_rmsnorm_rejects_bad_weight(sk):
     w = torch.ones(128, device="cuda")
     with pytest.raises(RuntimeError):
         sk.rmsnorm(x, w)
+
+
+def test_rmsnorm_vectorized_variant_rejects_unaligned_storage(sk):
+    dtype = torch.bfloat16
+    # 4 bf16 = 8 bytes past a 16-byte boundary: contiguous, but no 128-bit loads possible
+    x = torch.randn(4 * 256 + 4, device="cuda", dtype=dtype)[4:].view(4, 256)
+    assert x.is_contiguous() and x.data_ptr() % 16 != 0
+    w = torch.ones(256, device="cuda", dtype=dtype)
+    with pytest.raises(ValueError):
+        sk.rmsnorm(x, w, 1e-6, 2)
+    with pytest.raises(ValueError):
+        sk.add_rmsnorm_(x, x.clone(), w)
+    # the default variant (block per row, scalar loads) takes it
+    torch.testing.assert_close(sk.rmsnorm(x, w), sk.reference.rmsnorm(x, w), **TOL[dtype])
