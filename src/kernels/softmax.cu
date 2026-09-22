@@ -250,8 +250,7 @@ void softmax_impl(const T* x, T* out, int rows, int cols, int variant, cudaStrea
     if (rows == 0) return;
 
     constexpr int VEC = VecTraits<T>::kWidth;
-    const bool vec_ok = (cols % VEC == 0) && (reinterpret_cast<uintptr_t>(x) % 16 == 0) &&
-                        (reinterpret_cast<uintptr_t>(out) % 16 == 0);
+    const bool vec_ok = (cols % VEC == 0) && is_aligned16(x) && is_aligned16(out);
 
     switch (variant) {
         case 0: {

@@ -26,7 +26,8 @@ int bandwidth_num_variants();
 // out[r, c] = x[r, c] * rsqrt(mean_c(x[r, :]^2) + eps) * w[c]
 // variant 0: one thread per row (naive)
 // variant 1: one warp per row, shuffle reduction
-// variant 2: one warp per row, 128-bit vectorized loads (cols % 8 == 0 for bf16, % 4 for f32)
+// variant 2: one warp per row, 128-bit vectorized loads (cols % 8 == 0 for bf16, % 4 for f32,
+//            and 16-byte aligned pointers)
 // variant 3: one block per row (for very wide rows, cols > 8192)
 void rmsnorm_f32(const float* x, const float* w, float* out, int rows, int cols, float eps,
                  int variant, cudaStream_t stream);
@@ -36,12 +37,14 @@ int rmsnorm_num_variants();
 
 // Fused residual-add + RMSNorm, the decoder-block pattern in Llama/Qwen:
 //   resid[r, :] += x[r, :];   out[r, :] = rmsnorm(resid[r, :]) * w
-// resid is updated in place. Uses the vectorized warp-per-row design (variant 2 above).
+// resid is updated in place. Uses the vectorized warp-per-row design (variant 2 above), with
+// the same requirements: cols % 8 == 0 and 16-byte aligned pointers.
 void add_rmsnorm_bf16(const __nv_bfloat16* x, __nv_bfloat16* resid, const __nv_bfloat16* w,
                       __nv_bfloat16* out, int rows, int cols, float eps, cudaStream_t stream);
 
 // ---- SwiGLU (fused gated activation) ---------------------------------------------------
-// out[i] = silu(gate[i]) * up[i], n elements. variant 0: scalar, 1: 128-bit vectorized.
+// out[i] = silu(gate[i]) * up[i], n elements. variant 0: scalar, 1: 128-bit vectorized
+// (16-byte aligned pointers; any n, the remainder is handled in-kernel).
 void swiglu_f32(const float* gate, const float* up, float* out, int64_t n, int variant,
                 cudaStream_t stream);
 void swiglu_bf16(const __nv_bfloat16* gate, const __nv_bfloat16* up, __nv_bfloat16* out, int64_t n,

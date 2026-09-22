@@ -97,10 +97,6 @@ __global__ void swiglu_vec_bf16_kernel(const __nv_bfloat16* __restrict__ gate,
     }
 }
 
-bool aligned16(const void* p) {
-    return (reinterpret_cast<uintptr_t>(p) % 16) == 0;
-}
-
 // Grid for the grid-stride vector kernels: enough blocks to fill the machine several times
 // over (8 blocks x 256 threads per SM), but never more blocks than there is vector work.
 // The factor of 8 was picked for GB10 (48 SMs); re-tune on the RTX 5090 (170 SMs).
@@ -128,7 +124,7 @@ void swiglu_impl(const T* gate, const T* up, T* out, int64_t n, int variant, cud
         return;
     }
 
-    SPARK_REQUIRE(aligned16(gate) && aligned16(up) && aligned16(out),
+    SPARK_REQUIRE(is_aligned16(gate) && is_aligned16(up) && is_aligned16(out),
                   "swiglu: variant 1 needs 16-byte aligned pointers");
     constexpr int VEC = 16 / static_cast<int>(sizeof(T));
     const unsigned grid = vec_grid(n / VEC);

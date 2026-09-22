@@ -121,7 +121,8 @@ __global__ void rmsnorm_warp_kernel(const T* __restrict__ x, const T* __restrict
 // Pass 1 reads the row once from DRAM to compute the sum of squares; pass 2
 // re-reads it (row <= 16 KB, served from L2: 24 MB on GB10, TBD on the RTX 5090) and
 // writes the output.
-// Requires cols % kWidth == 0.
+// Requires cols % kWidth == 0 and 16-byte aligned x, w, out (with cols a multiple of the
+// vector width, every row then starts on a 16-byte boundary too).
 // ---------------------------------------------------------------------------
 template <typename T, int kWarpsPerBlock>
 __global__ void rmsnorm_warp_vec_kernel(const T* __restrict__ x, const T* __restrict__ w,
@@ -246,7 +247,8 @@ template <typename T>
 void rmsnorm_dispatch(const T* x, const T* w, T* out, int rows, int cols, float eps, int variant,
                       cudaStream_t stream) {
     SPARK_REQUIRE(rows >= 0 && cols > 0, "rmsnorm: rows must be >= 0 and cols > 0");
-    SPARK_REQUIRE(variant >= 0 && variant < 4, "rmsnorm: variant must be in [0, 3]");
+    SPARK_REQUIRE(variant >= 0 && variant < rmsnorm_num_variants(),
+                  "rmsnorm: variant must be in [0, 3]");
     SPARK_REQUIRE(x != nullptr && w != nullptr && out != nullptr, "rmsnorm: null pointer");
     if (rows == 0) return;
 
@@ -267,6 +269,8 @@ void rmsnorm_dispatch(const T* x, const T* w, T* out, int rows, int cols, float 
         case 2: {
             SPARK_REQUIRE(cols % VecTraits<T>::kWidth == 0,
                           "rmsnorm variant 2: cols must be a multiple of 4 (f32) / 8 (bf16)");
+            SPARK_REQUIRE(is_aligned16(x) && is_aligned16(w) && is_aligned16(out),
+                          "rmsnorm variant 2: x, w and out must be 16-byte aligned");
             const int grid = cdiv(rows, kWarps);
             rmsnorm_warp_vec_kernel<T, kWarps>
                 <<<grid, kWarps * kWarpSize, 0, stream>>>(x, w, out, rows, cols, eps);
@@ -306,6 +310,8 @@ void add_rmsnorm_bf16(const __nv_bfloat16* x, __nv_bfloat16* resid, const __nv_b
     SPARK_REQUIRE(cols % 8 == 0, "add_rmsnorm_bf16: cols must be a multiple of 8");
     SPARK_REQUIRE(x != nullptr && resid != nullptr && w != nullptr && out != nullptr,
                   "add_rmsnorm: null pointer");
+    SPARK_REQUIRE(is_aligned16(x) && is_aligned16(resid) && is_aligned16(w) && is_aligned16(out),
+                  "add_rmsnorm_bf16: x, resid, w and out must be 16-byte aligned");
     if (rows == 0) return;
     constexpr int kWarps = 8;
     const int grid = cdiv(rows, kWarps);

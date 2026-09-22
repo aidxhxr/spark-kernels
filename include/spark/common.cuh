@@ -62,6 +62,14 @@ inline int num_sms() {
 constexpr int kWarpSize = 32;
 constexpr unsigned kFullMask = 0xffffffffu;
 
+// True if `p` can be read or written as one 128-bit vector. cudaMalloc returns 256-byte
+// aligned buffers, but a pointer into the middle of one (a PyTorch storage offset, say) may
+// not be; the vectorized kernels must refuse those instead of faulting with a misaligned
+// address, which poisons the CUDA context for the rest of the process.
+inline bool is_aligned16(const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) % 16) == 0;
+}
+
 // ---------------------------------------------------------------------------
 // Warp-level reductions (all lanes receive the result)
 // ---------------------------------------------------------------------------

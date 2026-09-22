@@ -51,10 +51,6 @@ unsigned grid_for(int64_t work_items, int block) {
     return static_cast<unsigned>(blocks);
 }
 
-bool aligned16(const void* p) {
-    return (reinterpret_cast<uintptr_t>(p) % 16) == 0;
-}
-
 }  // namespace
 
 int bandwidth_num_variants() {
@@ -75,7 +71,7 @@ void bandwidth_copy(const float* x, float* y, int64_t n, int variant, cudaStream
     }
 
     // Vectorized variants need 16-byte aligned pointers (cudaMalloc guarantees 256 bytes).
-    SPARK_REQUIRE(aligned16(x) && aligned16(y),
+    SPARK_REQUIRE(is_aligned16(x) && is_aligned16(y),
                   "bandwidth_copy: vectorized variants need 16-byte aligned pointers");
     const int64_t n4 = n / 4;
     const float4* x4 = reinterpret_cast<const float4*>(x);
