@@ -38,8 +38,8 @@ The launch is "occupancy-sized" rather than "problem-sized": there is exactly on
 SM stays busy until the last few iterations, and the same kernel handles any `n` up to
 `int64_t` range without hitting the 2^31 grid limit. The block count is a tunable; on a
 memory-bound kernel the goal is only enough loads in flight to cover DRAM latency, and 4 x 256
-threads x 16 B = 16 KB in flight per SM is comfortably past that on GB10. Whether it is on
-GDDR7 is an open question, see below.
+threads x 16 B = 16 KB in flight per SM is comfortably past that on GB10, and turned out to be
+enough on GDDR7 too (see the RTX 5090 notes).
 
 ## Reading this in Nsight Compute
 
@@ -56,37 +56,43 @@ ncu --set full --kernel-name regex:copy_ ./build/bench_bandwidth --n=67108864 --
 * `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` vs `..._requests.sum`: the sectors-per-request
   ratio should be 4 (fully coalesced 128-byte lines) for every variant here.
 
-## RTX 5090 notes (expectations, nothing measured yet)
+## RTX 5090 notes (measured)
 
-* Per-SM share of the bus is higher: 1,792 GB/s / 170 SMs ≈ 10.5 GB/s per SM, against
-  273 / 48 ≈ 5.7 on the GB10. Variant 0 is limited by the SM's load/store pipeline, not by
-  DRAM, so I expect the gap between variant 0 and variants 1/2 to be *wider* on the 5090: the
-  same instruction-bound lane now has almost twice the bandwidth it fails to use.
-* The "4 blocks x 256 threads per SM" constant was sized so that 16 KB in flight per SM covers
-  LPDDR5X latency. I do not know GDDR7's latency from the SM's point of view; at 6.5x the
-  bandwidth, the same latency window holds 6.5x more bytes. If variant 2 lands clearly below
-  `cudaMemcpy` D2D, sweep the blocks-per-SM constant (4, 8, 16) before anything else.
-* In Nsight Compute, `dram__throughput.avg.pct_of_peak_sustained_elapsed` and
-  "Warp State → Stall Long Scoreboard" tell the two cases apart: low throughput with few
-  scoreboard stalls means not enough loads in flight; low throughput with many means the
-  memory system itself is the limit.
-* The card boosts and throttles: compare `min_ms` with the median, and see
-  [../RTX5090.md](../RTX5090.md#measuring-on-a-geforce-card) before trusting a run. GeForce
-  needs admin rights for the hardware counters.
-* How far below 1,792 GB/s `cudaMemcpy` D2D lands: TBD — this bench is what measures it.
+* **`cudaMemcpy` D2D lands at 1,527–1,530 GB/s, 85.3% of the 1,792 GB/s spec.** That is the
+  number every memory-bound kernel in this repo is judged against: the row kernels reach
+  1,500–1,580 GB/s on their DRAM-bound shapes, i.e. 98–103% of it (SwiGLU exceeds the copy
+  slightly because two reads per write turn the bus around less often than one read per write).
+* **Variant 0 is not instruction-bound here.** The prediction was a wider gap between the
+  scalar and vectorized variants than on the GB10; the measurement is a tie: 1,540 vs
+  1,538 GB/s at 64M elements, 1,532 vs 1,532 at 256M. A warp's 128 B scalar loads are issued
+  fast enough on sm_120 to keep the SM's ≈ 10.5 GB/s share of the bus busy, so the win from
+  `float4` shows up in instruction counts, not in time. (It does show up in time for the
+  bf16 row kernels, whose scalar loads are 64 B per warp.)
+* **The grid-stride variant is 2–3% slower** (1,494 GB/s). 4 × 256 threads × 16 B = 16 KB in
+  flight per SM is enough to cover GDDR7 latency, so the "blocks per SM" constant is not the
+  problem; the problem is that 680 long-lived blocks over 170 SMs finish unevenly at the end
+  of the array, while the problem-sized grid of variant 1 (262,144 blocks of 256 `float4`
+  threads at 256M elements) lets the block scheduler balance the tail at a finer grain. The
+  blocks-per-SM sweep was not needed and was not run.
+* **The L2 is 96 MB.** Both bench sizes (256 MB and 1 GiB per buffer) are well past it, so
+  these are DRAM numbers; the row-kernel benches include shapes that are *not* and report L2
+  bandwidth there (2–6 TB/s), which is called out in each of those docs.
+* `min_ms` is within 0.7% of the median on every row: the copy never reaches the 600 W power
+  limit and the 300 ms ramp is enough.
 
 ## Results (RTX 5090)
 
-Fill in from `results/bandwidth.json` after `make bench`. A GB10 table (% of 273 GB/s) is added
-when the Spark has been benchmarked.
+From `results/bandwidth.json`: median and minimum of 50 iterations, CUDA 13.2, driver 595.58,
+no display attached, power limit 600 W. A GB10 table (% of 273 GB/s) is added when the Spark has
+been benchmarked.
 
-| variant | n | median ms | GB/s | % of cudaMemcpy D2D | % of 1,792 GB/s |
-|---------|---|-----------|------|---------------------|-----------------|
-| memcpy  | 64M  |  |  | 100 |  |
-| 0       | 64M  |  |  |  |  |
-| 1       | 64M  |  |  |  |  |
-| 2       | 64M  |  |  |  |  |
-| memcpy  | 256M |  |  | 100 |  |
-| 0       | 256M |  |  |  |  |
-| 1       | 256M |  |  |  |  |
-| 2       | 256M |  |  |  |  |
+| variant | n | median ms | min ms | GB/s | % of cudaMemcpy D2D | % of 1,792 GB/s |
+|---------|---|-----------|--------|------|---------------------|-----------------|
+| memcpy  | 64M  | 0.3508 | 0.3488 | 1530 | 100.0% | 85.4% |
+| 0       | 64M  | 0.3486 | 0.3464 | 1540 | 100.6% | 85.9% |
+| 1       | 64M  | 0.3491 | 0.3483 | 1538 | 100.5% | 85.8% |
+| 2       | 64M  | 0.3594 | 0.3570 | 1494 | 97.6% | 83.4% |
+| memcpy  | 256M | 1.4068 | 1.4016 | 1527 | 100.0% | 85.2% |
+| 0       | 256M | 1.4017 | 1.3996 | 1532 | 100.4% | 85.5% |
+| 1       | 256M | 1.4017 | 1.3988 | 1532 | 100.4% | 85.5% |
+| 2       | 256M | 1.4386 | 1.4281 | 1493 | 97.8% | 83.3% |

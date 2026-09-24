@@ -22,17 +22,25 @@ arch flag and the tuning constants differ. What the two machines mean for kernel
 | Fact | RTX 5090 | GB10 | Consequence |
 |---|---|---|---|
 | Memory bandwidth | 1,792 GB/s GDDR7, discrete | 273 GB/s LPDDR5X, unified | Memory-bound kernels are judged as % of this. Fusion removes whole passes and launches on both; the time saved per pass is ~6.5× larger on the GB10, where it matters more than on HBM parts. GDDR7 is much closer to HBM-class. |
-| fp32 peak | ≈ 104.8 TFLOPS | ≈ 31 TFLOPS | fp32 ridge ≈ 58.5 vs 114 FLOP/byte. A 4096³ SGEMM (≈ 683 FLOP/byte) is compute-bound on both, with more margin on the 5090. |
-| bf16 dense peak | TBD — not published, not measured yet | ~213 TFLOPS (community measurement) | GB10 ridge ≈ 780 FLOP/byte; a GEMM block tile must reuse operands heavily through smem and L2. 5090 ridge TBD; "% of peak" for `hgemm` stays "—" until `--bf16-peak=<TFLOPS>` is passed to the results scripts. The GB10 number is not scaled. |
-| L2 | TBD — read from the bench banner / `deviceQuery` | 24 MB | GB10: a 4096×4096 bf16 operand (32 MB) does *not* fit, so tile order matters. Whether it fits on the 5090 is open until the L2 size is known. |
-| `mma.sync` yes, `tcgen05`/TMA no | same | same | Tensor-core GEMMs use the WMMA API and `cp.async`, not CUTLASS 3.x SM100 pipelines. |
+| fp32 peak | 123.4 TFLOPS measured (`bench_peak`; 104.8 spec at the spec clock) | ≈ 31 TFLOPS | fp32 ridge ≈ 69 vs 114 FLOP/byte. A 4096³ SGEMM (≈ 683 FLOP/byte) is compute-bound on both, with more margin on the 5090. In practice `sgemm` is bound by shared-memory bandwidth on sm_120, not FMAs (see [sgemm](design/sgemm.md)). |
+| bf16 dense peak | 258.7 TFLOPS measured at 2,976 MHz; ≈ 239 at the 2.72–2.78 GHz a sustained GEMM runs at under the 600 W power limit | ~213 TFLOPS (community measurement) | Ridges ≈ 144 vs 780 FLOP/byte; a GEMM block tile must reuse operands heavily through smem and L2. The results scripts read the measured peaks from `results/peak.json`. The GB10 number is not scaled. |
+| L2 | 96 MB | 24 MB | GB10: a 4096×4096 bf16 operand (32 MB) does *not* fit, so tile order matters. On the 5090 both operands of a 4096³ GEMM fit, and any row-kernel bench shape under ~32 MB per operand measures L2, not DRAM, so the headline shapes are 256 MB+. |
+| `mma.sync`, `cp.async` and TMA yes; `tcgen05` / `wgmma` no | same | same | Tensor-core GEMMs use `mma.sync` (WMMA for the early rungs) and `cp.async`, not CUTLASS 3.x SM100 pipelines. TMA (`cp.async.bulk.tensor`) exists on sm_120 but is not used here. |
 | SMs | 170 | 48 | Grid sizes for grid-stride kernels are set from `multiProcessorCount` at runtime. Fixed-size launches (one block per GEMM tile, one block per row) need 3.5× more blocks to fill the 5090. |
 
-The tile sizes and crossovers in the kernels (`hgemm` 128×128×32 with +8 padding and 8 warps per
-tile, `sgemm` 128×128×8 with an 8×8 register tile, `cols > 8192` / `cols > 4096` for the
-block-per-row rmsnorm / softmax) were reasoned for 48 SMs and 273 GB/s. They are correct on
-both machines and get re-derived for the 5090 after the first benchmark run; each per-kernel
-note has an "RTX 5090 notes" section saying what I expect to move. Expectations, not results.
+The tile sizes and crossovers in the first rungs (`hgemm` 128×128×32 with +8 padding and 8
+warps per tile, `sgemm` 128×128×8 with an 8×8 register tile, `cols > 8192` / `cols > 4096` for
+the block-per-row rmsnorm / softmax) were reasoned for 48 SMs and 273 GB/s. The top rungs were
+tuned on the 5090: `hgemm` v3 keeps the 128×128×32 tile (a sweep of BK = 64, 4 stages and
+128×256 was slower) but moves to raw `mma.sync` + `ldmatrix`, an XOR swizzle, a 3-stage
+pipeline and split-K on the last partial wave of tiles; `sgemm` v4/v5 use register prefetch
+and a 256×128 / 16×8 tile against the shared-memory bandwidth limit; rmsnorm v4 and softmax v3
+keep the row in registers and pick the thread group from the row length. Each per-kernel note
+has an "RTX 5090 notes" section with what was measured.
+
+One more thing the SM count does: 170 = 2 × 5 × 17, so no power-of-two tile grid divides into
+whole waves. With 2 resident blocks per SM a 4096² output has 1,024 tiles = 3.01 waves, and
+the last 4 tiles cost a whole wave; the GEMMs split those tail tiles along K over the idle SMs.
 
 ## Measuring
 
@@ -52,8 +60,9 @@ note has an "RTX 5090 notes" section saying what I expect to move. Expectations,
 
 ## Profiling
 
-`scripts/profile_ncu.sh` runs Nsight Compute with `--set full`. The metrics referenced in the
-design docs:
+`scripts/profile_ncu.sh` runs Nsight Compute with `--set full` on the top two rungs of every
+ladder and dumps the details page to `results/ncu_*.txt`. The metrics referenced in the design
+docs:
 
 | Metric | Tells you |
 |---|---|
