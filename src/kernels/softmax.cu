@@ -1,5 +1,5 @@
 // Row-wise softmax: naive three-pass -> warp-per-row online softmax -> block-per-row online
-// softmax. See docs/design/softmax.md for the optimization story.
+// softmax -> single pass with the row in registers. See docs/design/softmax.md.
 //
 // All variants compute in fp32 regardless of the storage type T (float or __nv_bfloat16).
 
@@ -238,9 +238,143 @@ __global__ void softmax_block_kernel(const T* __restrict__ x, T* __restrict__ ou
 }
 
 // ---------------------------------------------------------------------------
+// Variant 3: single pass, row in registers.
+// A group of G threads (32..1024) holds the whole row in registers (VPT 16-byte vectors per
+// thread): x is read from DRAM once, exp is computed once, and the output is written once.
+// Variants 1-2 read the row twice (the second time from L2) and evaluate exp twice. Rows up to
+// 32 K elements qualify; wider or unaligned rows run variant 2's kernel.
+// ---------------------------------------------------------------------------
+constexpr int kMaxElemsPerThread = 32;
+
+template <int G>
+struct Group {
+    static constexpr int kBlock = G < 256 ? 256 : G;
+    static constexpr int kRowsPerBlock = kBlock / G;
+    static constexpr int kWarps = G / kWarpSize;
+    static_assert(G % kWarpSize == 0 && kBlock % G == 0, "G must be a multiple of 32");
+};
+
+// Reduce `v` (with `warp_op` over a warp, `merge` across warps) over the caller's G-thread
+// group; every thread of the group receives the result. All threads of the block must call.
+template <int G, typename WarpOp, typename Merge>
+__device__ __forceinline__ float group_reduce(float v, float* red, int tid, float identity,
+                                              WarpOp warp_op, Merge merge) {
+    v = warp_op(v);
+    if constexpr (Group<G>::kWarps > 1) {
+        __syncthreads();  // `red` may still be read from a previous reduction
+        if ((tid & (kWarpSize - 1)) == 0) red[tid >> 5] = v;
+        __syncthreads();
+        const int first = (tid / G) * Group<G>::kWarps;
+        v = identity;
+#pragma unroll
+        for (int k = 0; k < Group<G>::kWarps; ++k) v = merge(v, red[first + k]);
+    }
+    return v;
+}
+
+template <typename T, int G, int VPT>
+__global__ void __launch_bounds__(Group<G>::kBlock)
+    softmax_reg_kernel(const T* __restrict__ x, T* __restrict__ out, int rows, int cols) {
+    using VT = VecTraits<T>;
+    constexpr int kW = VT::kWidth;
+    __shared__ float red[Group<G>::kBlock / kWarpSize];
+
+    const int tid = threadIdx.x;
+    const int t = tid % G;
+    const int row = blockIdx.x * Group<G>::kRowsPerBlock + tid / G;
+    const bool active = row < rows;  // no early return: the group reductions sync
+    const int nvec = cols / kW;
+    const T* xr = x + static_cast<size_t>(row) * cols;
+
+    float v[VPT][kW];
+    float m = -INFINITY;
+    if (active) {
+#pragma unroll
+        for (int i = 0; i < VPT; ++i) {
+            const int idx = t + i * G;
+            if (idx < nvec) {
+                VT::load(xr + idx * kW, v[i]);
+#pragma unroll
+                for (int e = 0; e < kW; ++e) m = fmaxf(m, v[i][e]);
+            }
+        }
+    }
+    m = group_reduce<G>(
+        m, red, tid, -INFINITY, [](float a) { return warp_reduce_max(a); },
+        [](float a, float b) { return fmaxf(a, b); });
+
+    float s = 0.0f;
+    if (active) {
+#pragma unroll
+        for (int i = 0; i < VPT; ++i) {
+            const int idx = t + i * G;
+            if (idx < nvec) {
+#pragma unroll
+                for (int e = 0; e < kW; ++e) {
+                    v[i][e] = __expf(v[i][e] - m);
+                    s += v[i][e];
+                }
+            }
+        }
+    }
+    s = group_reduce<G>(
+        s, red, tid, 0.0f, [](float a) { return warp_reduce_sum(a); },
+        [](float a, float b) { return a + b; });
+    if (!active) return;
+
+    const float inv = 1.0f / s;
+    T* orow = out + static_cast<size_t>(row) * cols;
+#pragma unroll
+    for (int i = 0; i < VPT; ++i) {
+        const int idx = t + i * G;
+        if (idx < nvec) {
+#pragma unroll
+            for (int e = 0; e < kW; ++e) v[i][e] *= inv;
+            VT::store(orow + idx * kW, v[i]);
+        }
+    }
+}
+
+template <typename T, int G, int VPT>
+void launch_reg(const T* x, T* out, int rows, int cols, cudaStream_t stream) {
+    const int grid = cdiv(rows, Group<G>::kRowsPerBlock);
+    softmax_reg_kernel<T, G, VPT><<<grid, Group<G>::kBlock, 0, stream>>>(x, out, rows, cols);
+}
+
+// Smallest vector count per thread that covers the row with a G-thread group.
+template <typename T, int G>
+bool launch_group(const T* x, T* out, int rows, int cols, cudaStream_t stream) {
+    constexpr int kMaxVPT = kMaxElemsPerThread / VecTraits<T>::kWidth;  // 8 f32, 4 bf16
+    const int need = cdiv(cols / VecTraits<T>::kWidth, G);
+    if (need > kMaxVPT) return false;
+    if (need <= 1) {
+        launch_reg<T, G, 1>(x, out, rows, cols, stream);
+    } else if (need <= 2) {
+        launch_reg<T, G, 2>(x, out, rows, cols, stream);
+    } else if (need <= 4) {
+        launch_reg<T, G, 4>(x, out, rows, cols, stream);
+    } else {
+        if constexpr (kMaxVPT >= 8) launch_reg<T, G, 8>(x, out, rows, cols, stream);
+    }
+    return true;
+}
+
+// Smallest group whose registers hold the row: 32 threads for narrow rows (8 rows per
+// block), up to 1024 for 32 K-wide ones. False if no configuration fits.
+template <typename T>
+bool softmax_reg(const T* x, T* out, int rows, int cols, cudaStream_t stream) {
+    return launch_group<T, 32>(x, out, rows, cols, stream) ||
+           launch_group<T, 64>(x, out, rows, cols, stream) ||
+           launch_group<T, 128>(x, out, rows, cols, stream) ||
+           launch_group<T, 256>(x, out, rows, cols, stream) ||
+           launch_group<T, 512>(x, out, rows, cols, stream) ||
+           launch_group<T, 1024>(x, out, rows, cols, stream);
+}
+
+// ---------------------------------------------------------------------------
 // Host dispatch
 // ---------------------------------------------------------------------------
-constexpr int kNumVariants = 3;
+constexpr int kNumVariants = 4;
 
 template <typename T>
 void softmax_impl(const T* x, T* out, int rows, int cols, int variant, cudaStream_t stream) {
@@ -268,6 +402,10 @@ void softmax_impl(const T* x, T* out, int rows, int cols, int variant, cudaStrea
                 softmax_warp_kernel<T, false><<<grid, threads, 0, stream>>>(x, out, rows, cols);
             }
             break;
+        }
+        case 3: {
+            if (vec_ok && softmax_reg<T>(x, out, rows, cols, stream)) break;
+            [[fallthrough]];  // unaligned, ragged or > 32 K wide: block per row, two passes
         }
         case 2: {
             const int grid = rows;
