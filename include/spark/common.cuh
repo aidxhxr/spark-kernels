@@ -161,6 +161,16 @@ __device__ __forceinline__ void cp_async_16(void* smem_ptr, const void* gmem_ptr
     const unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(gmem_ptr) : "memory");
 }
+// Same, but with `valid == false` nothing is read and the 16 smem bytes are zero-filled
+// (src-size 0): the way a tile row past the end of a matrix is loaded without a branch.
+__device__ __forceinline__ void cp_async_16_zfill(void* smem_ptr, const void* gmem_ptr,
+                                                  bool valid) {
+    const unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
+    const int bytes = valid ? 16 : 0;
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem_ptr),
+                 "r"(bytes)
+                 : "memory");
+}
 __device__ __forceinline__ void cp_async_commit() {
     asm volatile("cp.async.commit_group;\n" ::: "memory");
 }
@@ -168,6 +178,37 @@ __device__ __forceinline__ void cp_async_commit() {
 template <int N>
 __device__ __forceinline__ void cp_async_wait() {
     asm volatile("cp.async.wait_group %0;\n" ::"n"(N) : "memory");
+}
+
+// ---------------------------------------------------------------------------
+// Raw tensor-core primitives (sm_80+; used by the hgemm mma.sync variants).
+// ---------------------------------------------------------------------------
+// ldmatrix: four 8x8 b16 matrices from shared memory into one register per matrix per lane.
+// Lanes 8i..8i+7 supply the row addresses of matrix i (16 bytes per row).
+__device__ __forceinline__ void ldmatrix_x4(unsigned (&r)[4], const void* smem_ptr) {
+    const unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(s));
+}
+// Same, transposing each 8x8 matrix on the way: turns a k-major (row = k) tile of B into the
+// "col" operand layout mma.sync wants.
+__device__ __forceinline__ void ldmatrix_x4_trans(unsigned (&r)[4], const void* smem_ptr) {
+    const unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(s));
+}
+// D[16x8] (+)= A[16x16] * B[16x8], bf16 inputs, fp32 accumulate. Fragment layouts are the
+// PTX ISA ones for m16n8k16: a[4] = (rows g / g+8) x (k 0-7 / 8-15), b[2] = k 0-7 / 8-15,
+// d[4] = (row g, cols 2c..2c+1), (row g+8, same cols) with g = lane/4, c = lane%4.
+__device__ __forceinline__ void mma_bf16_16816(float (&d)[4], const unsigned (&a)[4],
+                                               const unsigned (&b)[2]) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
 }  // namespace spark
