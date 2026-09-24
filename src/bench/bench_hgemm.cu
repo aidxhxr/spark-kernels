@@ -69,15 +69,24 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
     for (size_t i = 0; i < nA; ++i) hAb[i] = __float2bfloat16(hA[i]);
     for (size_t i = 0; i < nB; ++i) hBb[i] = __float2bfloat16(hB[i]);
 
+    // Decode shapes (M <= 64) are bound by streaming B, and B alone (32 MB for 4096x4096) fits
+    // in the RTX 5090's 96 MB L2, so timing one B back to back would measure L2, not DRAM. A
+    // real decode step touches every layer's weights once per token, so the timing loop
+    // rotates through enough copies of B to exceed L2 (256 MB+), for cuBLAS and for us alike.
+    const size_t b_bytes = nB * sizeof(__nv_bfloat16);
+    const int copies = M <= 64 ? static_cast<int>((size_t{256} << 20) / b_bytes) + 1 : 1;
+
     __nv_bfloat16 *dA = nullptr, *dB = nullptr, *dC = nullptr, *dRef = nullptr;
     SPARK_CUDA_CHECK(cudaMalloc(&dA, nA * sizeof(__nv_bfloat16)));
-    SPARK_CUDA_CHECK(cudaMalloc(&dB, nB * sizeof(__nv_bfloat16)));
+    SPARK_CUDA_CHECK(cudaMalloc(&dB, copies * b_bytes));
     SPARK_CUDA_CHECK(cudaMalloc(&dC, nC * sizeof(__nv_bfloat16)));
     SPARK_CUDA_CHECK(cudaMalloc(&dRef, nC * sizeof(__nv_bfloat16)));
     SPARK_CUDA_CHECK(
         cudaMemcpy(dA, hAb.data(), nA * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
     SPARK_CUDA_CHECK(
         cudaMemcpy(dB, hBb.data(), nB * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+    for (int c = 1; c < copies; ++c)
+        SPARK_CUDA_CHECK(cudaMemcpy(dB + c * nB, dB, b_bytes, cudaMemcpyDeviceToDevice));
     SPARK_CUDA_CHECK(cudaMemset(dC, 0, nC * sizeof(__nv_bfloat16)));
 
     // Reference.
@@ -101,11 +110,13 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
                      M, N, K, err.max_abs, tol);
     }
 
-    // Timing.
+    // Timing. Each launch takes the next copy of B (see `copies` above).
+    int turn = 0;
+    auto next_b = [&] { return dB + static_cast<size_t>(turn++ % copies) * nB; };
     const auto t_ref = spark::bench::time_kernel(
-        [&] { cublas_gemm(handle, dA, dB, dRef, M, N, K); }, stream, 5, iters);
+        [&] { cublas_gemm(handle, dA, next_b(), dRef, M, N, K); }, stream, 5, iters);
     const auto t_us = spark::bench::time_kernel(
-        [&] { spark::hgemm_bf16(dA, dB, dC, M, N, K, variant, stream); }, stream, 5, iters);
+        [&] { spark::hgemm_bf16(dA, next_b(), dC, M, N, K, variant, stream); }, stream, 5, iters);
 
     const double flops = 2.0 * M * N * static_cast<double>(K);
     spark::bench::Row row;
@@ -116,14 +127,16 @@ bool run_one(cublasHandle_t handle, cudaStream_t stream, const Shape& s, int var
     row.median_ms = t_us.median_ms;
     row.min_ms = t_us.min_ms;
     row.tflops = flops / (t_us.median_ms * 1e-3) / 1e12;
-    row.gbps = 0.0;
+    // A + B + C once each: the traffic floor, which is what a decode shape is bound by.
+    row.gbps = 2.0 * (nA + nB + nC) / (t_us.median_ms * 1e-3) / 1e9;
     row.ref_ms = t_ref.median_ms;
     row.max_abs_err = err.max_abs;
     row.max_rel_err = err.max_rel;
     row.ok = ok;
     spark::bench::print_row(row);
-    std::fprintf(stderr, "    cuBLAS: %.2f TFLOPS | this kernel = %.1f%% of cuBLAS\n",
-                 flops / (t_ref.median_ms * 1e-3) / 1e12, 100.0 * t_ref.median_ms / t_us.median_ms);
+    std::fprintf(stderr, "    cuBLAS: %.2f TFLOPS | this kernel = %.1f%% of cuBLAS%s\n",
+                 flops / (t_ref.median_ms * 1e-3) / 1e12, 100.0 * t_ref.median_ms / t_us.median_ms,
+                 copies > 1 ? " | B rotated over copies that exceed L2 (DRAM-bound)" : "");
 
     SPARK_CUDA_CHECK(cudaFree(dA));
     SPARK_CUDA_CHECK(cudaFree(dB));
@@ -143,8 +156,11 @@ int run(int argc, char** argv) {
         const int m = args.geti("m", 4096);
         shapes.push_back({m, args.geti("n", m), args.geti("k", m)});
     } else {
-        shapes = {{1024, 1024, 1024}, {2048, 2048, 2048},  {4096, 4096, 4096},
-                  {8192, 8192, 8192}, {4096, 4096, 11008}, {4096, 11008, 4096}};
+        // Square and Llama-7B projection shapes at 4096 tokens, then decode shapes: 16 and 64
+        // tokens against the same weights, where the GEMM is bound by streaming B.
+        shapes = {{1024, 1024, 1024},  {2048, 2048, 2048},  {4096, 4096, 4096}, {8192, 8192, 8192},
+                  {4096, 4096, 11008}, {4096, 11008, 4096}, {16, 4096, 4096},   {64, 4096, 4096},
+                  {16, 11008, 4096},   {64, 4096, 11008}};
     }
     const int iters = args.geti("iters", 50);
     std::vector<int> variants;

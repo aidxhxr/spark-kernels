@@ -1,6 +1,6 @@
 // Benchmark + correctness check for RMSNorm and fused add+RMSNorm.
 //
-//   ./bench_rmsnorm [--rows=4096] [--cols=<single width>] [--iters=100]
+//   ./bench_rmsnorm [--rows=4096] [--cols=4096] [--iters=100]   (rows/cols: one shape)
 //
 // Every variant is validated against a double-precision CPU reference; the process
 // exits 1 if any check fails. JSON rows go to stdout, a human table to stderr.
@@ -223,10 +223,13 @@ bool bench_add_rmsnorm(int rows, int cols, int iters, cudaStream_t stream) {
 
 int run(int argc, char** argv) {
     Args args(argc, argv);
-    const int rows = args.geti("rows", 4096);
     const int iters = args.geti("iters", 100);
-    std::vector<int> col_list = {1024, 2048, 4096, 8192};
-    if (args.has("cols")) col_list = {args.geti("cols", 4096)};
+    // Llama/Qwen hidden sizes at 4096 tokens, plus one shape whose input alone (256 MB bf16)
+    // is bigger than the RTX 5090's 96 MB L2, so the headline row is DRAM-bound for certain.
+    std::vector<std::pair<int, int>> shapes = {
+        {4096, 1024}, {4096, 2048}, {4096, 4096}, {4096, 8192}, {16384, 8192}};
+    if (args.has("rows") || args.has("cols"))
+        shapes = {{args.geti("rows", 4096), args.geti("cols", 4096)}};
 
     print_device_banner();
     print_header();
@@ -235,10 +238,11 @@ int run(int argc, char** argv) {
     SPARK_CUDA_CHECK(cudaStreamCreate(&stream));
 
     bool ok = true;
-    for (int cols : col_list) ok = bench_rmsnorm_dtype<float>(rows, cols, iters, stream) && ok;
-    for (int cols : col_list)
+    for (auto [rows, cols] : shapes)
+        ok = bench_rmsnorm_dtype<float>(rows, cols, iters, stream) && ok;
+    for (auto [rows, cols] : shapes)
         ok = bench_rmsnorm_dtype<__nv_bfloat16>(rows, cols, iters, stream) && ok;
-    for (int cols : col_list) ok = bench_add_rmsnorm(rows, cols, iters, stream) && ok;
+    for (auto [rows, cols] : shapes) ok = bench_add_rmsnorm(rows, cols, iters, stream) && ok;
 
     SPARK_CUDA_CHECK(cudaStreamDestroy(stream));
     if (!ok) {

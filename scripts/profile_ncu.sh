@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Profile the headline kernels with Nsight Compute and dump the "details" page as text.
+# Profile the top two rungs of each ladder with Nsight Compute and dump the "details" page
+# as text.
 #   ./scripts/profile_ncu.sh [build_dir]
 #
 # Permissions: ncu needs access to GPU performance counters, which the driver restricts to
@@ -33,11 +34,15 @@ profile() {
   echo "    -> $RESULTS/ncu_$name.ncu-rep, $RESULTS/ncu_$name.txt" >&2
 }
 
-profile hgemm_v2  'hgemm'   "$BUILD_DIR/bench_hgemm"   --variant=2 --m=4096 --n=4096 --k=4096 --iters=1 --warmup=0
-profile hgemm_v0  'hgemm'   "$BUILD_DIR/bench_hgemm"   --variant=0 --m=4096 --n=4096 --k=4096 --iters=1 --warmup=0
-profile sgemm_v3  'sgemm'   "$BUILD_DIR/bench_sgemm"   --variant=3 --m=4096 --n=4096 --k=4096 --iters=1 --warmup=0
-profile rmsnorm   'rmsnorm' "$BUILD_DIR/bench_rmsnorm" --iters=1 --warmup=0
-profile softmax   'softmax' "$BUILD_DIR/bench_softmax" --iters=1 --warmup=0
+profile hgemm_v3   'hgemm_v3' "$BUILD_DIR/bench_hgemm" --variant=3 --m=8192 --n=8192 --k=8192 --iters=1 --warmup=0
+profile hgemm_v2   'hgemm_v2' "$BUILD_DIR/bench_hgemm" --variant=2 --m=8192 --n=8192 --k=8192 --iters=1 --warmup=0
+profile hgemm_v0   'hgemm_v0' "$BUILD_DIR/bench_hgemm" --variant=0 --m=4096 --n=4096 --k=4096 --iters=1 --warmup=0
+profile sgemm_v4   'sgemm_regtile_prefetch' "$BUILD_DIR/bench_sgemm" --variant=4 --m=4096 --n=4096 --k=4096 --iters=1 --warmup=0
+profile sgemm_v3   'sgemm_regtile_cpasync'  "$BUILD_DIR/bench_sgemm" --variant=3 --m=4096 --n=4096 --k=4096 --iters=1 --warmup=0
+profile rmsnorm_v4 'rmsnorm_reg'   "$BUILD_DIR/bench_rmsnorm" --rows=16384 --cols=8192 --iters=1 --warmup=0
+profile rmsnorm_v3 'rmsnorm_block' "$BUILD_DIR/bench_rmsnorm" --rows=16384 --cols=8192 --iters=1 --warmup=0
+profile softmax_v3 'softmax_reg'   "$BUILD_DIR/bench_softmax" --cols=16384 --iters=1 --warmup=0
+profile softmax_v2 'softmax_block' "$BUILD_DIR/bench_softmax" --cols=16384 --iters=1 --warmup=0
 
 echo "open the .ncu-rep files in the Nsight Compute GUI, or grep the .txt dumps for" >&2
 echo "'Achieved Occupancy', 'DRAM Throughput', 'Shared Memory Bank Conflicts'." >&2

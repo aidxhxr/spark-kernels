@@ -20,7 +20,8 @@ def ints_after(bench: str, pattern: str) -> list[int]:
 
 
 def test_row_kernel_widths_match_the_cpp_defaults():
-    assert ints_after("bench_rmsnorm", r"col_list =") == bench_torch.RMSNORM_COLS
+    flat = ints_after("bench_rmsnorm", r"shapes =")
+    assert [tuple(flat[i:i + 2]) for i in range(0, len(flat), 2)] == bench_torch.RMSNORM_SHAPES
     assert ints_after("bench_softmax", r"cols_list =") == bench_torch.SOFTMAX_COLS
     assert ints_after("bench_swiglu", r"int cols :") == bench_torch.SWIGLU_COLS
 

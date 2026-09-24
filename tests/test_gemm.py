@@ -6,6 +6,11 @@ from conftest import TOL
 SGEMM_SHAPES = [(64, 64, 64), (129, 257, 65), (1024, 1024, 1024), (1, 4096, 4096)]
 HGEMM_SHAPES_16 = [(256, 256, 256), (272, 144, 48), (16, 16, 16)]
 HGEMM_SHAPES_128 = [(256, 384, 256), (128, 128, 32), (512, 512, 4096)]
+# variant 3: any M % 16 == 0 (rows past M are zero-filled), N % 64 == 0, K % 64 == 0. The
+# shapes cover every tile it picks (128x128, 64x128, 64x64), the decode case (M <= 64) and
+# the split-K tail (a K long enough to split, few tiles).
+HGEMM_SHAPES_V3 = [(16, 64, 64), (16, 4096, 1024), (64, 256, 512), (272, 128, 4096),
+                   (208, 1088, 192), (1024, 1024, 1024)]
 HGEMM_TOL = dict(atol=3e-2, rtol=3e-2)
 
 
@@ -52,7 +57,18 @@ def test_hgemm_multiples_of_16(sk, shape, variant):
 @pytest.mark.parametrize("variant", _variants("hgemm"))
 @pytest.mark.parametrize("shape", HGEMM_SHAPES_128, ids=lambda s: f"M{s[0]}_N{s[1]}_K{s[2]}")
 def test_hgemm_multiples_of_128(sk, shape, variant):
+    if variant == 3 and shape[2] % 64 != 0:
+        pytest.skip("variant 3 needs K % 64 == 0")
     _hgemm_case(sk, shape, variant)
+
+
+@pytest.mark.parametrize("shape", HGEMM_SHAPES_V3, ids=lambda s: f"M{s[0]}_N{s[1]}_K{s[2]}")
+def test_hgemm_variant3_any_m(sk, shape):
+    if 3 not in _variants("hgemm"):
+        pytest.skip("variant 3 not built")
+    _hgemm_case(sk, shape, 3)
+    # Repeated calls must agree with the reference too: the split-K tail reuses a workspace.
+    _hgemm_case(sk, shape, 3)
 
 
 def test_hgemm_rejects_unaligned(sk):
@@ -78,7 +94,7 @@ def test_hgemm_default_variant_takes_any_multiple_of_16(sk):
     torch.manual_seed(0)
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
-    got = sk.hgemm(a, b)  # steps down to variant 1
+    got = sk.hgemm(a, b)  # N % 64 != 0: steps down past variants 3 and 2 to variant 1
     ref = (a.float() @ b.float()).to(torch.bfloat16)
     torch.testing.assert_close(got.float(), ref.float(), **HGEMM_TOL)
     with pytest.raises(ValueError):  # an explicit variant is never substituted

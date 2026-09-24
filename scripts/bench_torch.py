@@ -26,14 +26,16 @@ OUT = ROOT / "results" / "torch_comparison.json"
 # Same default shapes as the C++ benches (src/bench/bench_*.cu): the results table joins the two
 # on (kernel, dtype, shape), so a shape that is only timed here never shows up.
 ROWS = 4096
-RMSNORM_COLS = [1024, 2048, 4096, 8192]  # also add_rmsnorm
+# also add_rmsnorm
+RMSNORM_SHAPES = [(4096, 1024), (4096, 2048), (4096, 4096), (4096, 8192), (16384, 8192)]
 SOFTMAX_COLS = [128, 1024, 4096, 16384]
 SWIGLU_COLS = [2048, 5632, 11008, 14336]
 # (M, N, K): C = A(MxK) @ B(KxN)
 SGEMM_SHAPES = [(512, 512, 512), (1024, 1024, 1024), (2048, 2048, 2048), (4096, 4096, 4096),
                 (4096, 4096, 11008), (4096, 11008, 4096)]
 HGEMM_SHAPES = [(1024, 1024, 1024), (2048, 2048, 2048), (4096, 4096, 4096), (8192, 8192, 8192),
-                (4096, 4096, 11008), (4096, 11008, 4096)]
+                (4096, 4096, 11008), (4096, 11008, 4096),
+                (16, 4096, 4096), (64, 4096, 4096), (16, 11008, 4096), (64, 4096, 11008)]
 WARMUP, ITERS = 10, 100
 
 
@@ -134,9 +136,19 @@ def bench_sgemm(sk, add, M, N, K):
 
 def bench_hgemm(sk, add, M, N, K):
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
-    ours = time_ms(lambda: sk.hgemm(a, b))
-    ref = time_ms(lambda: a @ b)
+    # Decode shapes (M <= 64) are bound by streaming B, which alone fits the RTX 5090's 96 MB
+    # L2, so the loop rotates through enough copies of B to exceed L2, as bench_hgemm does.
+    copies = (256 << 20) // (K * N * 2) + 1 if M <= 64 else 1
+    bs = [torch.randn(K, N, device="cuda", dtype=torch.bfloat16) for _ in range(copies)]
+    turn = [0]
+
+    def next_b():
+        b = bs[turn[0] % copies]
+        turn[0] += 1
+        return b
+
+    ours = time_ms(lambda: sk.hgemm(a, next_b()))
+    ref = time_ms(lambda: a @ next_b())
     add("hgemm", "bf16", gemm_shape(M, N, K), ours, ref, tflops=2.0 * M * N * K / ours / 1e9)
 
 
@@ -195,8 +207,8 @@ def main() -> int:
         )
 
     for dtype in (torch.float32, torch.bfloat16):
-        for cols in RMSNORM_COLS:
-            bench_rmsnorm(sk, add, dtype, ROWS, cols)
+        for rows, cols in RMSNORM_SHAPES:
+            bench_rmsnorm(sk, add, dtype, rows, cols)
         for cols in SOFTMAX_COLS:
             bench_softmax(sk, add, dtype, ROWS, cols)
         for cols in SWIGLU_COLS:

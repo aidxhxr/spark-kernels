@@ -34,7 +34,8 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6, variant: int = 
         x: [..., cols] float32 or bfloat16 CUDA tensor (contiguous).
         w: [cols] weight, same dtype as x.
         eps: numerical epsilon inside the rsqrt.
-        variant: implementation index; -1 = fastest (variant 3, which takes any cols).
+        variant: implementation index; -1 = fastest (variant 4; it runs variant 3's kernel on
+            rows it cannot hold in registers, so any cols works).
             Variant 2 needs cols % 4 == 0 (float32) or cols % 8 == 0 (bfloat16) and
             16-byte aligned x, w and out.
     """
