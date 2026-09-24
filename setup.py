@@ -31,18 +31,19 @@ nvcc_flags = [
     "-O3",
     "-lineinfo",  # keep source correlation for Nsight Compute
     "--expt-relaxed-constexpr",
-    "-std=c++17",
+    "-std=c++20",  # torch >= 2.9 headers require C++20
 ] + gencode_flags
 
+# setuptools refuses absolute source paths, so everything is relative to the project root.
 sources = [os.path.join("python", "csrc", "bindings.cpp")] + sorted(
-    glob.glob(os.path.join(ROOT, "src", "kernels", "*.cu"))
+    os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, "src", "kernels", "*.cu"))
 )
 
 ext = CUDAExtension(
     name="spark_kernels._C",
     sources=sources,
     include_dirs=[os.path.join(ROOT, "include")],
-    extra_compile_args={"cxx": ["-O3", "-std=c++17"], "nvcc": nvcc_flags},
+    extra_compile_args={"cxx": ["-O3", "-std=c++20"], "nvcc": nvcc_flags},
 )
 
 # name, version and the rest of the metadata come from the [project] table in pyproject.toml.
