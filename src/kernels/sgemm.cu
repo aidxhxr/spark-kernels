@@ -8,10 +8,18 @@
 //            float4 global loads, A tile stored transposed in smem
 // variant 3: variant 2 + two-stage cp.async double buffering (A tile stored untransposed
 //            with a +4 pad so the strided fragment reads are bank-conflict free)
+// variant 4: register-prefetch double buffering (next tile loaded into registers during
+//            the FMAs, transposed on the way into smem), 128x128x16 tile
+// variant 5: variant 4 with a 256x128 tile and 16x8 micro-tiles: 0.75 instead of 1 byte of
+//            shared memory read per FMA, which is the binding limit on sm_120 (128 FMA and
+//            128 B of LDS per SM per clock)
+// Variants 4 and 5 split the tiles of the last partial wave along K (fp32 atomics into C).
 //
 // All variants accept arbitrary M, N, K >= 1 and guard every global access.
 // See docs/design/sgemm.md for the reasoning behind each rung. Tile sizes are GB10-derived
 // (48 SMs, 273 GB/s); re-tune on the RTX 5090 (170 SMs, 1,792 GB/s GDDR7).
+
+#include <algorithm>
 
 #include "spark/common.cuh"
 #include "spark/kernels.h"
@@ -127,22 +135,23 @@ __device__ __forceinline__ void store_c_chunk(float* __restrict__ C, int M, int 
     }
 }
 
-// Thread -> micro-tile mapping used by variants 2 and 3.
-// 256 threads form a 16 (rows) x 16 (cols) grid of 8x8 micro-tiles over a 128x128 block tile.
-// Each thread's 8 rows are {ty*4 + i} and {64 + ty*4 + i}, i in 0..3; likewise for columns.
-// The split-in-two layout makes a warp's float4 reads of the B tile contiguous (conflict-free)
-// and turns the C stores into two float4 stores per row.
+// Thread -> micro-tile mapping used by variants 2-5.
+// 256 threads form a (BM/TM) x (BN/TN) grid of TM x TN micro-tiles over a BM x BN block tile.
+// A thread's rows come in groups of 4: {q * kQuarterM + ty*4 + i}, q = 0..TM/4-1, i = 0..3
+// (for the 128x128 / 8x8 case: {ty*4 + i} and {64 + ty*4 + i}); columns likewise in two
+// groups of 4. The split layout makes a warp's float4 reads of the A and B tiles contiguous
+// (conflict-free) and turns the C stores into float4 stores.
 template <int BM, int BN, int TM, int TN>
 struct MicroTile {
-    static_assert(TM == 8 && TN == 8, "layout below assumes 8x8 micro-tiles");
+    static_assert(TM % 4 == 0 && TN == 8, "layout below assumes TM x 8 micro-tiles, TM % 4 == 0");
     static constexpr int kThreadsY = BM / TM;               // 16
     static constexpr int kThreadsX = BN / TN;               // 16
     static constexpr int kThreads = kThreadsY * kThreadsX;  // 256
-    static constexpr int kHalfM = BM / 2;
+    static constexpr int kQuarterM = BM / (TM / 4);         // row-group stride (128x128 / 8x8: 64)
     static constexpr int kHalfN = BN / 2;
 
     __device__ static __forceinline__ int row_of(int ty, int i) {
-        return (i < 4) ? (ty * 4 + i) : (kHalfM + ty * 4 + (i - 4));
+        return (i / 4) * kQuarterM + ty * 4 + (i % 4);
     }
     __device__ static __forceinline__ int col_of(int tx, int j) {
         return (j < 4) ? (tx * 4 + j) : (kHalfN + tx * 4 + (j - 4));
@@ -203,7 +212,7 @@ __global__ void __launch_bounds__(MicroTile<BM, BN, TM, TN>::kThreads)
             float a[TM];
             float b[TN];
             const float4 a0 = *reinterpret_cast<const float4*>(&As[k][ty * 4]);
-            const float4 a1 = *reinterpret_cast<const float4*>(&As[k][MT::kHalfM + ty * 4]);
+            const float4 a1 = *reinterpret_cast<const float4*>(&As[k][MT::kQuarterM + ty * 4]);
             a[0] = a0.x;
             a[1] = a0.y;
             a[2] = a0.z;
@@ -367,13 +376,227 @@ __global__ void __launch_bounds__(MicroTile<BM, BN, TM, TN>::kThreads)
     }
 }
 
+// ---------------------------------------------------------------------------
+// variant 4: register-prefetch double buffering, A transposed in smem, BK = 16
+//
+// cp.async (variant 3) cannot transpose, which forces the strided scalar reads of A in the
+// inner loop. Prefetching the next tile into registers instead (issued before the current
+// tile's FMAs, stored to smem after them) keeps the global loads in flight across the
+// compute just the same, and the register hop is exactly where the transpose happens for
+// free. The result is variant 2's inner loop (4 x LDS.128 per k per thread) with the
+// latency hiding of variant 3, and BK = 16 halves the barrier count per FLOP.
+// ---------------------------------------------------------------------------
+// XOR swizzle of the m index of the transposed A tile, keyed by k / 4. Without it the four
+// k-chunks of one row that neighbouring threads store land in the same bank (a row of As is
+// BM = 128 floats = 4 x 32 banks) and every transposed store is a 4-way conflict. The XOR
+// operand is a multiple of 8, so the float4 reads in the inner loop stay contiguous and
+// aligned; k is a compile-time constant there and the XOR folds into the address.
+__device__ __forceinline__ int swz_a(int k, int m) {
+    return m ^ ((k >> 2) << 3);
+}
+
+// Work assignment for the prefetch kernels (see `launch_prefetch`): blocks [0, dp_tiles) own
+// one whole output tile each; the blocks after that split the remaining tiles `split` ways
+// along K and add their partial sums straight into C (zeroed beforehand) with fp32 atomics.
+struct Sched {
+    int tiles_n;   // tiles along N (tile = tm * tiles_n + tn)
+    int dp_tiles;  // tiles handled whole
+    int split;     // K-slices per tail tile (1: no tail)
+};
+
+// kMinBlocks caps registers so that many blocks fit per SM: for the 128x128 / 8x8 tile the
+// natural 153 registers would leave one 8-warp block per SM and the issue slot idle a third
+// of the time, and 128 costs nothing; the 256x128 / 16x8 tile (variant 5) needs ~245.
+template <int BM, int BN, int BK, int TM, int TN, int kMinBlocks>
+__global__ void __launch_bounds__(MicroTile<BM, BN, TM, TN>::kThreads, kMinBlocks)
+    sgemm_regtile_prefetch_kernel(const float* __restrict__ A, const float* __restrict__ B,
+                                  float* __restrict__ C, int M, int N, int K, Sched sched) {
+    using MT = MicroTile<BM, BN, TM, TN>;
+    constexpr int kAChunks = (BM * BK / 4) / MT::kThreads;  // float4 chunks of A per thread
+    constexpr int kBChunks = (BK * BN / 4) / MT::kThreads;
+    static_assert(kAChunks * MT::kThreads * 4 == BM * BK, "A tile must divide evenly");
+    static_assert(kBChunks * MT::kThreads * 4 == BK * BN, "B tile must divide evenly");
+    constexpr int kAChunksPerRow = BK / 4;
+    constexpr int kBChunksPerRow = BN / 4;
+
+    __shared__ __align__(16) float As[BK][BM];  // transposed: As[k][m]
+    __shared__ __align__(16) float Bs[BK][BN];  // natural:    Bs[k][n]
+
+    const int tid = threadIdx.x;
+    const int ty = tid / MT::kThreadsX;
+    const int tx = tid % MT::kThreadsX;
+
+    const int KT = cdiv(K, BK);
+    int tile, t_begin, t_end;
+    if (static_cast<int>(blockIdx.x) < sched.dp_tiles) {
+        tile = blockIdx.x;
+        t_begin = 0;
+        t_end = KT;
+    } else {
+        const int r = blockIdx.x - sched.dp_tiles;
+        tile = sched.dp_tiles + r / sched.split;
+        const int slice = r % sched.split;
+        t_begin = static_cast<int>(static_cast<long long>(slice) * KT / sched.split);
+        t_end = static_cast<int>(static_cast<long long>(slice + 1) * KT / sched.split);
+    }
+    const int bm = (tile / sched.tiles_n) * BM;
+    const int bn = (tile % sched.tiles_n) * BN;
+
+    float pa[kAChunks][4];
+    float pb[kBChunks][4];
+    auto gload = [&](int t) {
+        const int k_base = t * BK;
+#pragma unroll
+        for (int i = 0; i < kAChunks; ++i) {
+            const int c = tid + i * MT::kThreads;
+            load_a_chunk(A, M, K, bm + c / kAChunksPerRow, k_base + (c % kAChunksPerRow) * 4,
+                         pa[i]);
+        }
+#pragma unroll
+        for (int i = 0; i < kBChunks; ++i) {
+            const int c = tid + i * MT::kThreads;
+            load_b_chunk(B, K, N, k_base + c / kBChunksPerRow, bn + (c % kBChunksPerRow) * 4,
+                         pb[i]);
+        }
+    };
+    auto sstore = [&]() {
+#pragma unroll
+        for (int i = 0; i < kAChunks; ++i) {
+            const int c = tid + i * MT::kThreads;
+            const int row = c / kAChunksPerRow;
+            const int k0 = (c % kAChunksPerRow) * 4;
+#pragma unroll
+            for (int e = 0; e < 4; ++e) As[k0 + e][swz_a(k0 + e, row)] = pa[i][e];
+        }
+#pragma unroll
+        for (int i = 0; i < kBChunks; ++i) {
+            const int c = tid + i * MT::kThreads;
+            *reinterpret_cast<float4*>(&Bs[c / kBChunksPerRow][(c % kBChunksPerRow) * 4]) =
+                make_float4(pb[i][0], pb[i][1], pb[i][2], pb[i][3]);
+        }
+    };
+
+    float acc[TM][TN];
+#pragma unroll
+    for (int i = 0; i < TM; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
+
+    gload(t_begin);
+    sstore();
+    __syncthreads();
+
+    for (int t = t_begin; t < t_end; ++t) {
+        const bool more = t + 1 < t_end;
+        if (more) gload(t + 1);  // in flight while the FMAs below run
+
+#pragma unroll
+        for (int k = 0; k < BK; ++k) {
+            float a[TM];
+            float b[TN];
+#pragma unroll
+            for (int q = 0; q < TM / 4; ++q) {
+                const float4 aq =
+                    *reinterpret_cast<const float4*>(&As[k][swz_a(k, q * MT::kQuarterM + ty * 4)]);
+                a[4 * q] = aq.x;
+                a[4 * q + 1] = aq.y;
+                a[4 * q + 2] = aq.z;
+                a[4 * q + 3] = aq.w;
+            }
+            const float4 b0 = *reinterpret_cast<const float4*>(&Bs[k][tx * 4]);
+            const float4 b1 = *reinterpret_cast<const float4*>(&Bs[k][MT::kHalfN + tx * 4]);
+            b[0] = b0.x;
+            b[1] = b0.y;
+            b[2] = b0.z;
+            b[3] = b0.w;
+            b[4] = b1.x;
+            b[5] = b1.y;
+            b[6] = b1.z;
+            b[7] = b1.w;
+#pragma unroll
+            for (int i = 0; i < TM; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j) acc[i][j] = fmaf(a[i], b[j], acc[i][j]);
+        }
+        __syncthreads();  // everyone is done reading the tile before it is overwritten
+        if (more) {
+            sstore();
+            __syncthreads();
+        }
+    }
+
+    if (tile < sched.dp_tiles) {
+#pragma unroll
+        for (int i = 0; i < TM; ++i) {
+            const int row = bm + MT::row_of(ty, i);
+            float lo[4] = {acc[i][0], acc[i][1], acc[i][2], acc[i][3]};
+            float hi[4] = {acc[i][4], acc[i][5], acc[i][6], acc[i][7]};
+            store_c_chunk(C, M, N, row, bn + MT::col_of(tx, 0), lo);
+            store_c_chunk(C, M, N, row, bn + MT::col_of(tx, 4), hi);
+        }
+        return;
+    }
+    // Tail tile: this block holds one K-slice of the sum; the tile of C was zeroed on the
+    // stream before the launch and every slice adds into it (the adds happen at L2).
+#pragma unroll
+    for (int i = 0; i < TM; ++i) {
+        const int row = bm + MT::row_of(ty, i);
+        if (row >= M) continue;
+#pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            const int col = bn + MT::col_of(tx, j);
+            if (col < N) atomicAdd(C + static_cast<size_t>(row) * N + col, acc[i][j]);
+        }
+    }
+}
+
+// Wave quantization: with P blocks resident at once, tiles past the last full wave would
+// run alone for a whole wave (4096^3 with 256x128 tiles: 512 tiles on 170 SMs, 3.01 waves
+// in the time of 4). Those tiles are split `split` ways along K over the idle blocks
+// instead (split-K on the tail only), so the extra wave lasts 1/split of a tile.
+template <int BM, int BN, int BK, int TM, int TN, int kMinBlocks>
+void launch_prefetch(const float* A, const float* B, float* C, int M, int N, int K,
+                     cudaStream_t stream) {
+    using MT = MicroTile<BM, BN, TM, TN>;
+    static int resident = 0;
+    if (resident == 0) {
+        int per_sm = 0;
+        SPARK_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, sgemm_regtile_prefetch_kernel<BM, BN, BK, TM, TN, kMinBlocks>, MT::kThreads,
+            0));
+        resident = (per_sm > 0 ? per_sm : 1) * num_sms();
+    }
+    Sched s;
+    s.tiles_n = cdiv(N, BN);
+    const int tiles = cdiv(M, BM) * s.tiles_n;
+    const int tail = tiles % resident;
+    s.split = tail > 0 ? std::min(cdiv(K, BK), resident / tail) : 1;
+    if (s.split <= 1) {
+        s.dp_tiles = tiles;
+        s.split = 1;
+    } else {
+        s.dp_tiles = tiles - tail;
+        for (int t = s.dp_tiles; t < tiles; ++t) {  // zero the tail tiles of C
+            const int bm = (t / s.tiles_n) * BM;
+            const int bn = (t % s.tiles_n) * BN;
+            SPARK_CUDA_CHECK(cudaMemset2DAsync(
+                C + static_cast<size_t>(bm) * N + bn, static_cast<size_t>(N) * sizeof(float), 0,
+                static_cast<size_t>(std::min(BN, N - bn)) * sizeof(float), std::min(BM, M - bm),
+                stream));
+        }
+    }
+    const int grid = s.dp_tiles + (tiles - s.dp_tiles) * s.split;
+    sgemm_regtile_prefetch_kernel<BM, BN, BK, TM, TN, kMinBlocks>
+        <<<grid, MT::kThreads, 0, stream>>>(A, B, C, M, N, K, s);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
 // Host entry point
 // ---------------------------------------------------------------------------
 int sgemm_num_variants() {
-    return 4;
+    return 6;
 }
 
 void sgemm(const float* A, const float* B, float* C, int M, int N, int K, int variant,
@@ -410,6 +633,12 @@ void sgemm(const float* A, const float* B, float* C, int M, int N, int K, int va
                 <<<grid, block, 0, stream>>>(A, B, C, M, N, K);
             break;
         }
+        case 4:
+            launch_prefetch<128, 128, 16, 8, 8, 2>(A, B, C, M, N, K, stream);
+            break;
+        case 5:
+            launch_prefetch<256, 128, 16, 16, 8, 1>(A, B, C, M, N, K, stream);
+            break;
         default:
             break;
     }
