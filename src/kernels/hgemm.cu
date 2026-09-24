@@ -10,11 +10,15 @@
 //   variant 0: one warp per 16x16 C tile, fragments loaded straight from global memory.
 //   variant 1: 128x128x32 block tile, 8 warps (2x4), shared-memory staged with +8 padding.
 //   variant 2: variant 1 + two-stage cp.async pipeline (load tile k+1 while computing tile k).
+//   variant 3: raw mma.sync + ldmatrix, XOR-swizzled smem, 3-stage cp.async pipeline,
+//              register-direct epilogue, split-K on the last partial wave of tiles.
 //
 // Tile sizes come from the GB10 analysis (48 SMs, 273 GB/s, 24 MB L2) in
 // docs/design/hgemm.md; re-tune on the RTX 5090 (170 SMs, 1,792 GB/s GDDR7).
 
 #include <mma.h>  // after cuda_bf16.h (pulled in by common.cuh)
+
+#include <algorithm>
 
 #include "spark/common.cuh"
 #include "spark/kernels.h"
@@ -306,10 +310,360 @@ __global__ void __launch_bounds__(TILE_THREADS)
     store_tile(acc, Cs[warp_id], C, M, N, bm, bn, warp_m, warp_n, lane);
 }
 
+// ---------------------------------------------------------------------------------------
+// Variant 3: what the WMMA rungs leave on the table, taken back.
+//   * raw mma.sync.m16n8k16 + ldmatrix instead of WMMA: fragments come straight out of
+//     shared memory in one instruction, and the epilogue writes bf16 pairs straight from
+//     the accumulator registers (no smem staging);
+//   * XOR-swizzled smem tiles instead of padded ones: bank-conflict-free ldmatrix on both
+//     operands with zero wasted bytes;
+//   * a 3-stage cp.async pipeline (two tiles in flight) instead of 2 stages, so DRAM latency
+//     is covered even when the tensor cores drain a 128x128x32 tile in under a microsecond;
+//   * one __syncthreads per BK tile, no epilogue barriers;
+//   * the tiles of the last, partial wave are split along K over the idle SMs (see `launch`);
+//   * the tile shrinks to 64x128 or 64x64 when a 128x128 grid would not fill the card, and
+//     rows past M are zero-filled, so decode shapes (M = 16..64) run on the same kernel.
+// Block tile 128x128xBK, 8 warps as 2 (M) x 4 (N), warp tile 64x32 = 4 x 4 mma tiles.
+// Host guarantees M,N % 128 == 0, K % BK == 0.
+// ---------------------------------------------------------------------------------------
+namespace v3 {
+
+constexpr int THREADS = 256;
+constexpr int WARPS_M = 2, WARPS_N = 4;  // 8 warps as 2 (M) x 4 (N), whatever the tile
+
+// Physical 16-byte chunk for logical (row, chunk) of an A tile whose rows are BK bf16 long.
+// Rows of 64 B (BK=32): chunk ^= (row/2)%4; rows of 128 B (BK=64): chunk ^= row%8. Either
+// way the 8 rows an ldmatrix touches land in 8 different bank groups.
+template <int BK>
+__device__ __forceinline__ int swz_a(int row, int chunk) {
+    if constexpr (BK == 32)
+        return chunk ^ ((row >> 1) & 3);
+    else
+        return chunk ^ (row & 7);
+}
+// B rows are >= 256 B (BN >= 128 bf16): XOR the low three bits of the chunk index with row%8.
+__device__ __forceinline__ int swz_b(int row, int chunk) {
+    return chunk ^ (row & 7);
+}
+
+template <int BM, int BN, int BK, int STAGES>
+constexpr int smem_bytes() {
+    return STAGES * (BM * BK + BK * BN) * static_cast<int>(sizeof(__nv_bfloat16));
+}
+
+// Work assignment (see `plan` below). Blocks [0, dp_tiles) each own one full output tile;
+// blocks from dp_tiles on split the remaining tiles `split` ways along K, accumulate their
+// K-slice into the fp32 workspace `ws` with atomics, and the last slice to finish a tile
+// converts it to bf16 (`counters` is one arrival counter per tail tile, zeroed with `ws`).
+struct Sched {
+    int tiles_n;   // tiles along N (tile index = tm * tiles_n + tn)
+    int dp_tiles;  // tiles handled whole
+    int split;     // K-slices per tail tile (1: no tail)
+    float* ws;     // (tiles - dp_tiles) x BM x BN fp32
+    int* counters;
+};
+
+// Tile rows past M are zero-filled on the way in and skipped on the way out, so any
+// M % 16 == 0 works with any BM; N % BN == 0 and K % BK == 0 are required.
+template <int BM, int BN, int BK, int STAGES>
+__global__ void __launch_bounds__(THREADS)
+    hgemm_v3_kernel(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B,
+                    __nv_bfloat16* __restrict__ C, int M, int N, int K, Sched sched) {
+    static_assert(BK == 32 || BK == 64, "swizzle assumes 64 B or 128 B rows of A");
+    static_assert(BM == 64 || BM == 128, "warp tile is BM/2 tall: 32 or 64");
+    static_assert(BN == 64 || BN == 128 || BN == 256, "warp tile is BN/4 wide: 16, 32 or 64");
+    constexpr int WM = BM / WARPS_M;  // 32 or 64
+    constexpr int WN = BN / WARPS_N;  // 16, 32 or 64
+    constexpr int MT = WM / 16;       // m16 tiles per warp
+    constexpr int NT = WN / 8;        // n8 tiles per warp (even: ldmatrix.x4 loads two)
+    static_assert(NT % 2 == 0, "");
+    constexpr int B_CPR = BN / 8;                    // 16-byte chunks per smem row of B
+    constexpr int A_CPR = BK / 8;                    // chunks per A row
+    constexpr int A_ITERS = (BM * A_CPR) / THREADS;  // chunks per thread per stage
+    constexpr int B_ITERS = (BK * B_CPR) / THREADS;
+    static_assert(A_ITERS * THREADS == BM * A_CPR && B_ITERS * THREADS == BK * B_CPR, "");
+    constexpr int A_STAGE = BM * BK;  // elements
+    constexpr int B_STAGE = BK * BN;
+
+    extern __shared__ __align__(128) unsigned char smem_raw[];
+    __nv_bfloat16* As = reinterpret_cast<__nv_bfloat16*>(smem_raw);
+    __nv_bfloat16* Bs = As + STAGES * A_STAGE;
+
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int wm = warp / WARPS_N;
+    const int wn = warp % WARPS_N;
+
+    const int KT = K / BK;
+    int tile, kt_begin, kt_end, slice = 0;
+    if (static_cast<int>(blockIdx.x) < sched.dp_tiles) {
+        tile = blockIdx.x;
+        kt_begin = 0;
+        kt_end = KT;
+    } else {
+        const int r = blockIdx.x - sched.dp_tiles;
+        tile = sched.dp_tiles + r / sched.split;
+        slice = r % sched.split;
+        kt_begin = static_cast<int>(static_cast<long long>(slice) * KT / sched.split);
+        kt_end = static_cast<int>(static_cast<long long>(slice + 1) * KT / sched.split);
+    }
+    const int bm = (tile / sched.tiles_n) * BM;
+    const int bn = (tile % sched.tiles_n) * BN;
+
+    const __nv_bfloat16* Ab = A + static_cast<size_t>(bm) * K + static_cast<size_t>(kt_begin) * BK;
+    const __nv_bfloat16* Bb = B + static_cast<size_t>(kt_begin) * BK * N + bn;
+    const int m_valid = M - bm;  // rows of this tile that exist
+
+    auto load_stage = [&](int stage, int k0) {
+        __nv_bfloat16* as = As + stage * A_STAGE;
+        __nv_bfloat16* bs = Bs + stage * B_STAGE;
+#pragma unroll
+        for (int i = 0; i < A_ITERS; ++i) {
+            const int c = tid + i * THREADS;
+            const int row = c / A_CPR;
+            const int ch = c % A_CPR;
+            const bool ok = row < m_valid;
+            cp_async_16_zfill(as + row * BK + swz_a<BK>(row, ch) * 8,
+                              Ab + static_cast<size_t>(ok ? row : 0) * K + k0 + ch * 8, ok);
+        }
+#pragma unroll
+        for (int i = 0; i < B_ITERS; ++i) {
+            const int c = tid + i * THREADS;
+            const int row = c / B_CPR;
+            const int ch = c % B_CPR;
+            cp_async_16(bs + row * BN + swz_b(row, ch) * 8,
+                        Bb + static_cast<size_t>(k0 + row) * N + ch * 8);
+        }
+    };
+
+    float acc[MT][NT][4];
+#pragma unroll
+    for (int i = 0; i < MT; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int e = 0; e < 4; ++e) acc[i][j][e] = 0.f;
+
+    const int nkt = kt_end - kt_begin;  // K-tiles this block accumulates (k0 below is relative)
+
+    // Prologue: the first STAGES-1 tiles are in flight before any compute starts.
+#pragma unroll
+    for (int s = 0; s < STAGES - 1; ++s) {
+        if (s < nkt) load_stage(s, s * BK);
+        cp_async_commit();
+    }
+
+    // Per-lane ldmatrix row/chunk selectors (constant across the K loop).
+    const int a_row_in_tile = lane & 15;   // row within a 16-row m tile
+    const int a_kchunk = lane >> 4;        // 0/1: k 0-7 or 8-15 of the current k16 step
+    const int b_krow_in_step = lane & 15;  // k row within the k16 step
+    const int b_nchunk = lane >> 4;        // 0/1: which n8 tile of the pair
+
+    for (int kt = 0; kt < nkt; ++kt) {
+        cp_async_wait<STAGES - 2>();  // tile kt has landed (for this thread)
+        __syncthreads();              // ... for every thread; and stage (kt-1)%STAGES is free
+        {
+            const int nk = kt + STAGES - 1;
+            if (nk < nkt) load_stage(nk % STAGES, nk * BK);
+            cp_async_commit();  // always commit so the group count stays uniform
+        }
+        const __nv_bfloat16* as = As + (kt % STAGES) * A_STAGE;
+        const __nv_bfloat16* bs = Bs + (kt % STAGES) * B_STAGE;
+
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 16) {
+            unsigned afrag[MT][4];
+            unsigned bfrag[NT][2];
+#pragma unroll
+            for (int mi = 0; mi < MT; ++mi) {
+                const int row = wm * WM + mi * 16 + a_row_in_tile;
+                const int ch = kk / 8 + a_kchunk;
+                ldmatrix_x4(afrag[mi], as + row * BK + swz_a<BK>(row, ch) * 8);
+            }
+#pragma unroll
+            for (int nj = 0; nj < NT; nj += 2) {
+                const int krow = kk + b_krow_in_step;
+                const int ch = (wn * WN + nj * 8) / 8 + b_nchunk;
+                unsigned r[4];
+                ldmatrix_x4_trans(r, bs + krow * BN + swz_b(krow, ch) * 8);
+                bfrag[nj][0] = r[0];
+                bfrag[nj][1] = r[1];
+                bfrag[nj + 1][0] = r[2];
+                bfrag[nj + 1][1] = r[3];
+            }
+#pragma unroll
+            for (int mi = 0; mi < MT; ++mi)
+#pragma unroll
+                for (int nj = 0; nj < NT; ++nj) mma_bf16_16816(acc[mi][nj], afrag[mi], bfrag[nj]);
+        }
+    }
+    cp_async_wait<0>();
+
+    // Epilogue: each lane owns (row g, cols 2c..2c+1) and (row g+8, same cols) of every
+    // 16x8 tile; two bf16 per store, straight from registers.
+    const int g = lane >> 2;
+    const int c2 = (lane & 3) * 2;
+    if (tile < sched.dp_tiles) {
+#pragma unroll
+        for (int mi = 0; mi < MT; ++mi) {
+#pragma unroll
+            for (int nj = 0; nj < NT; ++nj) {
+                const int row = bm + wm * WM + mi * 16 + g;
+                const int col = bn + wn * WN + nj * 8 + c2;
+                __nv_bfloat16* p0 = C + static_cast<size_t>(row) * N + col;
+                __nv_bfloat16* p1 = p0 + static_cast<size_t>(8) * N;
+                if (row < M)  // M % 16 == 0: row and row + 8 are in or out together
+                    *reinterpret_cast<__nv_bfloat162*>(p0) =
+                        __floats2bfloat162_rn(acc[mi][nj][0], acc[mi][nj][1]);
+                if (row + 8 < M)
+                    *reinterpret_cast<__nv_bfloat162*>(p1) =
+                        __floats2bfloat162_rn(acc[mi][nj][2], acc[mi][nj][3]);
+            }
+        }
+        return;
+    }
+
+    // Tail tile: accumulate this K-slice into the fp32 workspace tile. The adds are
+    // performed at L2, so no ordering between the slices is needed.
+    float* wt = sched.ws + static_cast<size_t>(tile - sched.dp_tiles) * BM * BN;
+#pragma unroll
+    for (int mi = 0; mi < MT; ++mi) {
+#pragma unroll
+        for (int nj = 0; nj < NT; ++nj) {
+            const int r0 = wm * WM + mi * 16 + g;
+            const int c0 = wn * WN + nj * 8 + c2;
+            if (r0 >= m_valid) continue;
+            atomicAdd(wt + r0 * BN + c0, acc[mi][nj][0]);
+            atomicAdd(wt + r0 * BN + c0 + 1, acc[mi][nj][1]);
+            if (r0 + 8 >= m_valid) continue;
+            atomicAdd(wt + (r0 + 8) * BN + c0, acc[mi][nj][2]);
+            atomicAdd(wt + (r0 + 8) * BN + c0 + 1, acc[mi][nj][3]);
+        }
+    }
+    // Last slice to arrive converts the finished tile to bf16. The fence orders every
+    // thread's adds before the counter; the smem flag broadcasts the outcome to the block.
+    __shared__ int s_last;
+    __threadfence();
+    __syncthreads();
+    if (tid == 0) {
+        s_last = atomicAdd(sched.counters + (tile - sched.dp_tiles), 1) == sched.split - 1;
+    }
+    __syncthreads();
+    if (!s_last) return;
+    __threadfence();
+    const int rows_here = m_valid < BM ? m_valid : BM;
+    for (int i = tid; i < rows_here * BN / 2; i += THREADS) {  // two elements per thread per step
+        const int r = (2 * i) / BN;
+        const int c = (2 * i) % BN;
+        const float2 v = __ldcg(reinterpret_cast<const float2*>(wt + r * BN + c));  // L2, not L1
+        *reinterpret_cast<__nv_bfloat162*>(C + static_cast<size_t>(bm + r) * N + bn + c) =
+            __floats2bfloat162_rn(v.x, v.y);
+    }
+}
+
+// Pipeline configuration of variant 3 (tuned on the RTX 5090, see docs/design/hgemm.md). The
+// tile is chosen per call: 128x128 when the grid fills the card, 64x128 / 64x64 for small or
+// decode-sized (M <= 64) problems, where the 128-row tile would leave most SMs idle.
+constexpr int V3_BK = 32;
+constexpr int V3_STAGES = 3;
+
+// Wave quantization. With P blocks resident at once (2 per SM, 340 on the RTX 5090) a
+// 4096^3 GEMM has 1024 tiles = 3.01 waves: the last 4 tiles run alone for as long as a
+// full wave, a quarter of the runtime. So the tiles past the last full wave are split
+// `split` ways along K across the otherwise idle blocks (split-K on the tail only, in the
+// spirit of Stream-K): the extra wave then lasts 1/split of a tile instead of a whole one.
+// The tail's fp32 partials go to a workspace (grown on demand, one per device, zeroed on
+// the stream before the launch); the tile's last slice converts it to bf16 in-kernel.
+struct Workspace {
+    float* ws = nullptr;
+    int* counters = nullptr;
+    size_t tiles = 0;
+};
+
+template <int BM, int BN, int BK, int STAGES>
+int resident_blocks() {
+    constexpr int bytes = smem_bytes<BM, BN, BK, STAGES>();
+    static int resident = 0;  // blocks resident per GPU; also the > 48 KB smem opt-in
+    if (resident == 0) {
+        SPARK_CUDA_CHECK(cudaFuncSetAttribute(hgemm_v3_kernel<BM, BN, BK, STAGES>,
+                                              cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+        int per_sm = 0;
+        SPARK_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, hgemm_v3_kernel<BM, BN, BK, STAGES>, THREADS, bytes));
+        resident = (per_sm > 0 ? per_sm : 1) * num_sms();
+    }
+    return resident;
+}
+
+template <int BM, int BN, int BK, int STAGES>
+void launch(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N, int K,
+            cudaStream_t stream) {
+    constexpr int bytes = smem_bytes<BM, BN, BK, STAGES>();
+    const int resident = resident_blocks<BM, BN, BK, STAGES>();
+
+    Sched s;
+    s.tiles_n = N / BN;
+    const int tiles = cdiv(M, BM) * s.tiles_n;
+    const int KT = K / BK;
+    const int tail = tiles % resident;
+    s.split = tail > 0 ? std::min(KT, resident / tail) : 1;
+    if (s.split <= 1) {  // no tail, or a tail too large to be worth splitting
+        s.dp_tiles = tiles;
+        s.split = 1;
+        s.ws = nullptr;
+        s.counters = nullptr;
+        hgemm_v3_kernel<BM, BN, BK, STAGES><<<tiles, THREADS, bytes, stream>>>(A, B, C, M, N, K, s);
+        return;
+    }
+    s.dp_tiles = tiles - tail;
+    static Workspace w;
+    if (w.tiles < static_cast<size_t>(tail)) {
+        if (w.ws) SPARK_CUDA_CHECK(cudaFree(w.ws));
+        if (w.counters) SPARK_CUDA_CHECK(cudaFree(w.counters));
+        w.tiles = tail;
+        SPARK_CUDA_CHECK(cudaMalloc(&w.ws, w.tiles * BM * BN * sizeof(float)));
+        SPARK_CUDA_CHECK(cudaMalloc(&w.counters, w.tiles * sizeof(int)));
+    }
+    s.ws = w.ws;
+    s.counters = w.counters;
+    SPARK_CUDA_CHECK(
+        cudaMemsetAsync(w.ws, 0, static_cast<size_t>(tail) * BM * BN * sizeof(float), stream));
+    SPARK_CUDA_CHECK(
+        cudaMemsetAsync(w.counters, 0, static_cast<size_t>(tail) * sizeof(int), stream));
+    const int grid = s.dp_tiles + tail * s.split;
+    hgemm_v3_kernel<BM, BN, BK, STAGES><<<grid, THREADS, bytes, stream>>>(A, B, C, M, N, K, s);
+}
+
+// Tile selection: the biggest tile whose grid is at least one full wave; for anything
+// smaller the 64x64 tile with the split-K tail. M <= 64 (decode shapes) always gets a 64-row
+// tile: the extra rows would be zero-filled work on a problem that is bound by streaming B.
+void launch_auto(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N,
+                 int K, cudaStream_t stream) {
+    auto tiles = [&](int bm, int bn) { return cdiv(M, bm) * (N / bn); };
+    if (M > 64 && N % 128 == 0 &&
+        tiles(128, 128) >= resident_blocks<128, 128, V3_BK, V3_STAGES>()) {
+        launch<128, 128, V3_BK, V3_STAGES>(A, B, C, M, N, K, stream);
+    } else if (N % 128 == 0 && tiles(64, 128) >= resident_blocks<64, 128, V3_BK, V3_STAGES>()) {
+        launch<64, 128, V3_BK, V3_STAGES>(A, B, C, M, N, K, stream);
+    } else {
+        // Small grids: BK = 64 halves the per-tile pipeline overhead that dominates when a
+        // block owns only a dozen K-tiles; decode shapes (M <= 64, bound by streaming B)
+        // gain from a fourth stage, everything else loses a little to the lower occupancy.
+        if (M <= 64) {
+            launch<64, 64, 64, 4>(A, B, C, M, N, K, stream);
+        } else {
+            launch<64, 64, 64, 3>(A, B, C, M, N, K, stream);
+        }
+    }
+}
+
+}  // namespace v3
+
 }  // namespace
 
 int hgemm_num_variants() {
-    return 3;
+    return 4;
 }
 
 bool hgemm_supports(int M, int N, int K, int variant) {
@@ -317,6 +671,7 @@ bool hgemm_supports(int M, int N, int K, int variant) {
     if (M <= 0 || N <= 0 || K <= 0) return false;
     if (M % WMMA_M != 0 || N % WMMA_N != 0 || K % WMMA_K != 0) return false;
     if (variant == 2) return M % BM == 0 && N % BN == 0 && K % BK == 0;
+    if (variant == 3) return N % 64 == 0 && K % 64 == 0;  // any M % 16 == 0
     return true;
 }
 
@@ -344,6 +699,12 @@ void hgemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C
                           "hgemm variant 2: requires M % 128 == 0, N % 128 == 0, K % 32 == 0");
             const dim3 grid(N / BN, M / BM);
             hgemm_v2_kernel<<<grid, TILE_THREADS, 0, stream>>>(A, B, C, M, N, K);
+            break;
+        }
+        case 3: {
+            SPARK_REQUIRE(hgemm_supports(M, N, K, 3),
+                          "hgemm variant 3: requires N % 64 == 0, K % 64 == 0");
+            v3::launch_auto(A, B, C, M, N, K, stream);
             break;
         }
         default:

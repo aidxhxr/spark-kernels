@@ -29,6 +29,9 @@ int bandwidth_num_variants();
 // variant 2: one warp per row, 128-bit vectorized loads (cols % 8 == 0 for bf16, % 4 for f32,
 //            and 16-byte aligned pointers)
 // variant 3: one block per row (for very wide rows, cols > 8192)
+// variant 4: single pass: a 32..1024-thread group holds the whole row in registers, so x is
+//            read once (rows up to 32768 elements, same alignment rules as variant 2; other
+//            inputs run variant 3's kernel)
 void rmsnorm_f32(const float* x, const float* w, float* out, int rows, int cols, float eps,
                  int variant, cudaStream_t stream);
 void rmsnorm_bf16(const __nv_bfloat16* x, const __nv_bfloat16* w, __nv_bfloat16* out, int rows,
@@ -37,8 +40,9 @@ int rmsnorm_num_variants();
 
 // Fused residual-add + RMSNorm, the decoder-block pattern in Llama/Qwen:
 //   resid[r, :] += x[r, :];   out[r, :] = rmsnorm(resid[r, :]) * w
-// resid is updated in place. Uses the vectorized warp-per-row design (variant 2 above), with
-// the same requirements: cols % 8 == 0 and 16-byte aligned pointers.
+// resid is updated in place. Single pass with the row in registers (variant 4 above) up to
+// 32768 columns, the vectorized warp-per-row design (variant 2) beyond; requires cols % 8 == 0
+// and 16-byte aligned pointers.
 void add_rmsnorm_bf16(const __nv_bfloat16* x, __nv_bfloat16* resid, const __nv_bfloat16* w,
                       __nv_bfloat16* out, int rows, int cols, float eps, cudaStream_t stream);
 
@@ -56,6 +60,9 @@ int swiglu_num_variants();
 // variant 0: naive three-pass (max, sum, normalize), one thread per row
 // variant 1: one warp per row, online softmax (single pass max/sum), vectorized loads
 // variant 2: one block per row, online softmax (for long rows, cols > 4096)
+// variant 3: single pass: a 32..1024-thread group holds the row in registers, one read, one
+//            exp, one write (cols % 4 (f32) / 8 (bf16) == 0, 16-byte aligned pointers, up to
+//            32768 columns; other inputs run variant 2's kernel)
 void softmax_f32(const float* x, float* out, int rows, int cols, int variant, cudaStream_t stream);
 void softmax_bf16(const __nv_bfloat16* x, __nv_bfloat16* out, int rows, int cols, int variant,
                   cudaStream_t stream);
@@ -67,6 +74,10 @@ int softmax_num_variants();
 // variant 1: shared-memory tiled (BM=BN=32, BK=32)
 // variant 2: register-tiled, each thread owns an 8x8 micro-tile, float4 global loads
 // variant 3: variant 2 + double-buffered shared memory (cp.async)
+// variant 4: variant 2 + register-prefetch double buffering, 128x128x16 tile
+// variant 5: variant 4 with a 256x128 tile and 16x8 micro-tiles (fewer smem bytes per FMA)
+// Variants 4 and 5 split the last partial wave of tiles along K and reduce with fp32 atomics
+// into C, so those tiles are not bitwise reproducible run to run.
 void sgemm(const float* A, const float* B, float* C, int M, int N, int K, int variant,
            cudaStream_t stream);
 int sgemm_num_variants();
@@ -77,6 +88,11 @@ int sgemm_num_variants();
 // variant 0: one warp per 16x16 output tile straight from global memory (WMMA baseline)
 // variant 1: block tile 128x128x32, 8 warps, shared-memory staged, padded to avoid bank conflicts
 // variant 2: variant 1 + cp.async double-buffered pipeline (requires M,N % 128 == 0, K % 32 == 0)
+// variant 3: raw mma.sync.m16n8k16 + ldmatrix, XOR-swizzled smem, 3-stage cp.async pipeline,
+//            split-K over the last partial wave of tiles (fp32 atomics into a per-device
+//            workspace, so those tiles are not bitwise reproducible run to run). The tile is
+//            picked per call (128x128, 64x128 or 64x64) so small and decode-sized (M <= 64)
+//            problems fill the card; requires N % 64 == 0 and K % 64 == 0, any M % 16 == 0
 void hgemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N,
                 int K, int variant, cudaStream_t stream);
 int hgemm_num_variants();
