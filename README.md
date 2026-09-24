@@ -1,135 +1,122 @@
 # spark-kernels
 
-Hand-written CUDA kernels for LLM inference, targeting an **NVIDIA RTX 5090** (GB202 Blackwell,
-compute capability 12.0, CUDA 13), with the **DGX Spark** (GB10, compute capability 12.1) as a
-second target to be benchmarked when mine arrives.
+CUDA kernels I wrote by hand for the parts of a Llama-style decoder block, run on an RTX 5090.
+RMSNorm, SwiGLU, softmax, an fp32 GEMM and a bf16 tensor-core GEMM. Each one is a ladder: a
+naive version first, then one change at a time, with every rung benchmarked against cuBLAS or
+PyTorch and profiled in Nsight Compute. The bf16 GEMM ends up at cuBLAS speed on most shapes,
+including the small-batch ones that matter for decoding.
 
-The name is historical: this started as a DGX Spark project, and the repo, the `spark::`
-namespace and the `spark_kernels` package keep the name.
+The name is left over from when this was going to run on a DGX Spark. The Spark hasn't shipped,
+the 5090 has, so the numbers below are from the 5090. The same source builds for the GB10 with
+`ARCH=121`.
 
-Every kernel is an *optimization ladder*: a naive version, then each step that removes a
-bottleneck, benchmarked against cuBLAS or PyTorch and profiled with Nsight Compute. The point is
-not to beat cuBLAS. The point is to show, with numbers, what each optimization buys on a real
-Blackwell part, and then what changes when the same kernels, under the same programming model,
-run on a memory system 6.5× slower: 1,792 GB/s GDDR7 on the 5090 against 273 GB/s LPDDR5X on
-the GB10.
+## numbers
 
-> **Status:** kernels, benchmarks, PyTorch bindings, and tests are written. Nothing has been run
-> on either machine yet. First build and benchmark run on the RTX 5090 is the next step; the
-> GB10 run follows when the Spark ships. The results tables below are filled from
-> `results/*.json` by `make results`.
+Measured 2026-09-24. Driver 595.58, CUDA 13.2, PyTorch 2.14+cu130. The GPU state during the run
+is in `results/env.txt`. Every row is the median of 100 launches (50 for the GEMMs) with CUDA
+events, after a clock ramp.
 
-## What is here
+Best rung of each ladder on its largest shape:
 
-| Kernel | Ladder | Compared against | Bound by |
+| kernel | shape | best | time | achieved | vs cuBLAS or naive | vs PyTorch |
+|---|---|---|---|---|---|---|
+| bf16 GEMM | 4096 x 4096 x 4096 | v3 | 0.611 ms | 225 TFLOPS | 99.7% of cuBLAS | 1.01x |
+| bf16 GEMM | 8192 x 8192 x 8192 | v3 | 4.99 ms | 220 TFLOPS | 94.9% of cuBLAS | 0.96x |
+| bf16 GEMM, decode | 16 x 4096 x 4096 | v3 | 27.7 us | 1,220 GB/s | 104.5% of cuBLAS | 1.08x |
+| fp32 GEMM | 4096 x 4096 x 11008 | v5 | 6.45 ms | 57 TFLOPS | 86.2% of cuBLAS | 0.87x |
+| rmsnorm bf16 | 16384 x 8192 | v4 | 0.351 ms | 1,529 GB/s | 10.4x over naive | 1.06x |
+| add + rmsnorm bf16 | 16384 x 8192 | fused | 0.711 ms | 1,509 GB/s | | 1.24x |
+| softmax bf16 | 4096 x 16384 | v3 | 0.174 ms | 1,544 GB/s | 25.4x over naive | 1.00x |
+| swiglu bf16 | 4096 x 14336 | v0 | 0.224 ms | 1,572 GB/s | | 1.61x |
+
+`cudaMemcpy` device to device gets 1,532 GB/s on this card, so the memory-bound rows are at
+the copy roof. The spec sheet says 1,792 GB/s. Nothing reaches that.
+
+### the bf16 GEMM against cuBLAS
+
+Variant 3 is raw `mma.sync.m16n8k16` with `ldmatrix`, an XOR-swizzled shared-memory tile, a
+three-stage `cp.async` pipeline, and split-K on the last partial wave of tiles. It picks a
+128x128, 64x128 or 64x64 tile per call depending on whether the grid fills the card.
+
+| M x N x K | v3 TFLOPS | cuBLAS TFLOPS | v3 / cuBLAS |
 |---|---|---|---|
-| `bandwidth_copy` | scalar → `float4` → grid-stride | `cudaMemcpy` D2D | Memory bandwidth (sets the roofline ceiling) |
-| `rmsnorm` (+ fused `add_rmsnorm`) | thread/row → warp/row → 128-bit loads → block/row | PyTorch eager | Memory bandwidth |
-| `swiglu` | scalar → 128-bit vectorized, fused `silu(g)*u` | PyTorch eager (2 kernels) | Memory bandwidth |
-| `softmax` | 3-pass → warp online-softmax → block online-softmax | `torch.softmax` | Memory bandwidth |
-| `sgemm` (fp32) | naive → smem tile → 8×8 register tile → cp.async double-buffer | cuBLAS SGEMM | FP32 cores |
-| `hgemm` (bf16) | WMMA baseline → 128×128×32 smem tile, padded → cp.async pipeline | cuBLAS bf16 GemmEx | Tensor cores |
+| 1024 x 1024 x 1024 | 122.5 | 121.4 | 100.9% |
+| 2048 x 2048 x 2048 | 166.1 | 172.5 | 96.3% |
+| 4096 x 4096 x 4096 | 224.9 | 225.7 | 99.7% |
+| 8192 x 8192 x 8192 | 220.4 | 232.2 | 94.9% |
+| 4096 x 4096 x 11008 | 224.8 | 227.6 | 98.8% |
+| 4096 x 11008 x 4096 | 224.5 | 239.4 | 93.8% |
 
-All kernels take a `variant` argument so every rung of the ladder is benchmarkable and
-testable, and all are exposed to PyTorch through a C++ extension with parity tests.
+Decode shapes, where the whole thing is streaming the weight matrix once. The bench rotates
+through enough copies of B to get past the 96 MB L2, otherwise both sides read out of cache
+and report numbers above what the memory can do.
 
-## Headline results (RTX 5090)
+| M x N x K | v3 | cuBLAS | v3 / cuBLAS |
+|---|---|---|---|
+| 16 x 4096 x 4096 | 1,220 GB/s | 1,168 GB/s | 104.5% |
+| 64 x 4096 x 4096 | 1,163 GB/s | 1,135 GB/s | 102.5% |
+| 16 x 11008 x 4096 | 1,449 GB/s | 1,494 GB/s | 97.0% |
+| 64 x 4096 x 11008 | 1,469 GB/s | 1,444 GB/s | 101.7% |
 
-<!-- Generated by `make results`; paste results/headline.md here. -->
+Two things I didn't expect. `bench_peak` measures 258.7 TFLOPS of dense bf16 `mma.sync` at
+2,976 MHz, but a real 8192 cubed GEMM hits the 600 W power limit within a second and the clock
+settles around 2.75 GHz. That puts the usable roof near 239 TFLOPS, which is where cuBLAS sits
+too. And 170 SMs is 2 x 5 x 17, so no power-of-two grid divides into whole waves. A 4096 square
+output has 1,024 tiles for 340 resident blocks, 3.01 waves, and the last four tiles used to run
+alone for as long as a full wave. Splitting the tail along K took 4096 cubed from 88% to 100%
+of cuBLAS.
 
-| Kernel | Best variant | Shape | Time | Achieved | % of peak / cuBLAS |
-|---|---|---|---|---|---|
-| bandwidth_copy | | 1 GiB | | GB/s | % of 1,792 GB/s |
-| rmsnorm bf16 | | 4096×8192 | | GB/s | % of 1,792 GB/s |
-| add_rmsnorm bf16 | | 4096×8192 | | GB/s | % of 1,792 GB/s |
-| swiglu bf16 | | 4096×14336 | | GB/s | % of 1,792 GB/s |
-| softmax f32 | | 4096×4096 | | GB/s | % of 1,792 GB/s |
-| sgemm fp32 | | 4096³ | | TFLOPS | % of cuBLAS |
-| hgemm bf16 | | 4096³ | | TFLOPS | % of cuBLAS |
+fp32 GEMM is a different story. On sm_120 an SM does 128 FMAs per clock and reads 128 bytes
+per clock from shared memory, and an 8x8 register tile needs a byte per FMA. cuBLAS SGEMM is
+stuck at the same wall, at 54% of the measured 123 TFLOPS. Variant 5 uses a 16x8 tile to get
+under a byte per FMA and lands at 84 to 90% of cuBLAS.
 
-Empty until the first run. 1,792 GB/s is the GDDR7 spec figure, so the bandwidth percentages
-are conservative; the `bandwidth_copy` row is the realistic roof. A GB10 table goes next to
-this one once the Spark has been benchmarked.
+Full tables in [docs/RESULTS.md](docs/RESULTS.md). Roofline in `results/roofline.png`. Nsight
+dumps in `results/ncu_*.txt`.
 
-Full tables: [docs/RESULTS.md](docs/RESULTS.md). Roofline: `results/roofline.png`.
+## what's here
 
-## Why these kernels
+| kernel | ladder | reference |
+|---|---|---|
+| `bandwidth_copy` | scalar, float4, grid-stride | `cudaMemcpy` D2D |
+| `rmsnorm`, `add_rmsnorm` | thread per row, warp per row, 128-bit loads, block per row, single pass with the row in registers | PyTorch eager |
+| `swiglu` | scalar, 128-bit vectorized | PyTorch eager, two kernels |
+| `softmax` | three pass, warp online softmax, block online softmax, single pass with the row in registers | `torch.softmax` |
+| `sgemm` fp32 | naive, smem tile, 8x8 register tile, cp.async, register prefetch with swizzle, 256x128 tile | cuBLAS SGEMM |
+| `hgemm` bf16 | WMMA, smem tile, cp.async, `mma.sync` + `ldmatrix` with swizzle, 3 stages and split-K | cuBLAS GemmEx |
+| `bench_peak` | | measures the card's real `mma.sync` and FMA peaks and the clock they run at |
 
-They are the non-GEMM and GEMM building blocks of a Llama/Qwen decoder block, which is what I
-serve in production with vLLM for [SwatGPT](https://github.com/aidxhxr/SwatGPT).
+Every kernel takes a `variant` argument so each rung can be run, timed and tested on its own.
+They're all exposed to PyTorch through a C++ extension, with parity tests for every variant.
 
-On the RTX 5090, 104.8 TFLOPS of fp32 against 1,792 GB/s gives a ridge point of about
-58 FLOP/byte (the bf16 tensor-core ridge is TBD: NVIDIA publishes no dense bf16 peak for the
-card and I have not measured one yet). A 4096³ GEMM sits at ≈ 683 FLOP/byte in fp32 and
-≈ 1,365 in bf16, so the GEMMs are compute-bound with a lot of margin. RMSNorm, SwiGLU and
-softmax sit at a few FLOP/byte, far left of the ridge: they are memory-bound, every
-elementwise pass over activations costs a full trip through DRAM, and fusing passes is the
-only lever. `add_rmsnorm` and `swiglu` exist to make that concrete.
+## running it
 
-The GB10 is the same story with the memory system turned down 6.5×: ridge points of 114
-(fp32) and about 780 (bf16, from a measured 213 TFLOPS) FLOP/byte, so each removed pass saves
-about 6.5× more wall time there than on GDDR7. On the 5090 fusion still removes whole passes
-and launches; the milliseconds it buys are smaller. Measuring that contrast with identical
-source is the reason to keep both targets.
-
-## Hardware
-
-**RTX 5090 (primary, `sm_120`):** 170 SMs, 21,760 CUDA cores, ~2.41 GHz, 32 GB GDDR7 on a
-discrete PCIe 5.0 x16 card at 1,792 GB/s, 575 W, 5th-gen tensor cores. fp32 peak ≈ 104.8 TFLOPS;
-bf16 tensor-core peak and L2 size are TBD until measured. Details in
-[docs/RTX5090.md](docs/RTX5090.md).
-
-**GB10 / DGX Spark (secondary, `sm_121`):** 48 SMs, 6,144 CUDA cores, ~2.42 GHz, 24 MB L2,
-128 GB LPDDR5X unified memory at 273 GB/s, 5th-gen tensor cores. Details in
-[docs/GB10.md](docs/GB10.md).
-
-Both are the consumer/workstation Blackwell lineage: `mma.sync` and `cp.async` work, `tcgen05`
-and TMA do not. No source changes between the two; only the arch flag and the tuning constants
-differ.
-
-## Build and run
-
-Requirements: CUDA 13.0+, CMake 3.24+, x86_64 Linux for the 5090 (WSL2 should work; native
-Windows is untested because the Makefile and scripts assume bash), and for the Python bindings
-a CUDA 13 PyTorch build: 2.9 or newer, the first release with `cu130` wheels (`pyproject.toml`
-pins `torch>=2.9`).
+You need CUDA 13, CMake 3.24 and, for the extension, a PyTorch with cu130 wheels (2.9 or
+newer). The extension builds as C++20 because the torch headers ask for it.
 
 ```bash
-git clone https://github.com/aidxhxr/spark-kernels && cd spark-kernels
+make build            # sm_120 by default; ARCH=121 for the GB10
+make bench            # every bench_* binary, validates each variant, writes results/*.json
+make results          # docs/RESULTS.md, results/headline.md, results/roofline.png
 
-make build            # cmake configure + build, arch 120 (ARCH=121 for the Spark, ARCH="120;121" for both)
-make bench            # runs every bench_* binary, writes results/*.json + env.txt (GPU state)
-make results          # docs/RESULTS.md + results/roofline.png + results/headline.md
+pip install -e . --no-build-isolation
+pytest -q tests
+python scripts/bench_torch.py
 
-pip install -e . --no-build-isolation   # PyTorch extension, sm_120 unless TORCH_CUDA_ARCH_LIST is set ("12.1" for the Spark)
-pytest -q tests       # parity tests against torch for every variant
-python scripts/bench_torch.py   # speedup vs PyTorch eager (--iters=N, --warmup=N as in the C++ benches)
-
-make ncu              # Nsight Compute reports for hgemm and rmsnorm
+make ncu              # Nsight Compute on the top two rungs of every ladder, needs root on GeForce
 ```
 
-`make help` lists every target. `make lint` runs the same ruff and clang-format checks as CI,
-and `pytest -q tests` works on a machine without a GPU too: the parity tests skip and only the
-results-script helpers are tested.
-
-Or run the whole sequence in one go with `./scripts/run_all.sh`.
-
-Individual benches accept overrides, for example:
+`./scripts/run_all.sh` does all of it in order. Individual benches take flags:
 
 ```bash
-./build/bench_hgemm --m=4096 --n=4096 --k=11008 --variant=2 --iters=200 --warmup=50
-./build/bench_rmsnorm --rows=8192 --cols=4096
+./build/bench_hgemm --m=16 --n=4096 --k=4096 --variant=3
+./build/bench_rmsnorm --rows=16384 --cols=8192
 ```
 
-Every JSON row records the `device` it ran on and `min_ms` next to the median. The 5090 boosts
-and throttles, so the first kernel of every bench is spun for ~300 ms to let the clocks ramp
-before anything is timed (`--warmup=0` turns that off, for profiling); see
-[docs/RTX5090.md](docs/RTX5090.md#measuring-on-a-geforce-card) for the measurement caveats.
+Each bench checks every variant against a reference, CPU double precision for the row kernels
+and cuBLAS for the GEMMs, and exits non-zero if anything is off.
 
-Each bench validates every variant against a reference (CPU double precision or cuBLAS) and
-exits non-zero on mismatch, so `make bench` doubles as the C++ test suite.
-
-## Using the kernels from PyTorch
+## from python
 
 ```python
 import torch, spark_kernels as sk
@@ -137,41 +124,38 @@ import torch, spark_kernels as sk
 x = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
 w = torch.ones(4096, device="cuda", dtype=torch.bfloat16)
 
-y = sk.rmsnorm(x, w, eps=1e-6)            # fastest variant
+y = sk.rmsnorm(x, w, eps=1e-6)             # fastest variant
 y0 = sk.rmsnorm(x, w, eps=1e-6, variant=0) # naive, for comparison
-out = sk.add_rmsnorm_(x, resid, w)         # fused residual add + norm, resid updated in place
+out = sk.add_rmsnorm_(x, resid, w)         # resid += x, then norm, in place
 h = sk.swiglu(gate, up)
 p = sk.softmax(scores)
 c = sk.hgemm(a_bf16, b_bf16)               # tensor-core GEMM
 ```
 
-## Design notes
+## notes
 
-One document per kernel explains each rung of its ladder, the memory-traffic and FLOP formulas
-used for the numbers, and which Nsight Compute metrics show the bottleneck each step removed:
+One document per kernel with what each rung changes, the traffic and FLOP formulas behind the
+numbers, and which Nsight metric moved:
 
-- [docs/DESIGN.md](docs/DESIGN.md) — overview and conventions
-- [docs/RTX5090.md](docs/RTX5090.md) — hardware sheet, primary target
-- [docs/GB10.md](docs/GB10.md) — hardware sheet, secondary target
-- [docs/design/bandwidth.md](docs/design/bandwidth.md)
-- [docs/design/rmsnorm.md](docs/design/rmsnorm.md)
-- [docs/design/swiglu.md](docs/design/swiglu.md)
-- [docs/design/softmax.md](docs/design/softmax.md)
-- [docs/design/sgemm.md](docs/design/sgemm.md)
-- [docs/design/hgemm.md](docs/design/hgemm.md)
+- [docs/DESIGN.md](docs/DESIGN.md), conventions and how things are measured
+- [docs/RTX5090.md](docs/RTX5090.md), the card, measured
+- [docs/GB10.md](docs/GB10.md), the card that hasn't arrived
+- [bandwidth](docs/design/bandwidth.md), [rmsnorm](docs/design/rmsnorm.md),
+  [swiglu](docs/design/swiglu.md), [softmax](docs/design/softmax.md),
+  [sgemm](docs/design/sgemm.md), [hgemm](docs/design/hgemm.md)
 
-## Layout
+Things I'd still like to do: Stream-K proper instead of only splitting the tail, a 16-row tile
+for M under 32, and figuring out why the 11008-wide fp32 shapes lose 10% per FLOP. Both cards
+are consumer Blackwell, so `mma.sync`, `cp.async` and TMA are available and `tcgen05` isn't.
 
 ```
-include/spark/     public API (kernels.h) and shared device helpers (common.cuh)
-src/kernels/       one .cu per kernel family, all variants inside
-src/bench/         one bench binary per kernel, JSON-lines output
-python/            PyTorch C++ extension and package
-tests/             pytest parity tests for every variant
-scripts/           run_all.sh, bench runner, torch comparison, results tables, roofline, ncu, gpu_env.sh
-docs/              hardware sheets (RTX5090.md, GB10.md), design notes, generated results
+include/spark/     public API and shared device helpers
+src/kernels/       one .cu per kernel, all variants inside
+src/bench/         one bench binary per kernel, JSON lines out
+python/            the PyTorch extension
+tests/             pytest parity tests
+scripts/           run_all.sh, results tables, roofline, ncu, torch comparison
+docs/              hardware sheets, design notes, generated results
 ```
 
-## License
-
-MIT
+MIT.
