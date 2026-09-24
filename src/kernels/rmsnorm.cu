@@ -5,7 +5,9 @@
 //   variant 1: one warp per row              (coalesced, shuffle reduction)
 //   variant 2: one warp per row, 128-bit loads (4 f32 / 8 bf16 per lane per transaction)
 //   variant 3: one 256-thread block per row  (for very wide rows)
-// Plus the fused residual-add + RMSNorm used in Llama/Qwen decoder blocks.
+//   variant 4: single pass, the row held in registers by a 32..1024-thread group
+// Plus the fused residual-add + RMSNorm used in Llama/Qwen decoder blocks (same single-pass
+// design).
 //
 // All math accumulates in fp32 regardless of the storage type T.
 
@@ -241,6 +243,232 @@ __global__ void add_rmsnorm_bf16_kernel(const __nv_bfloat16* __restrict__ x,
 }
 
 // ---------------------------------------------------------------------------
+// Variant 4: single pass, row in registers.
+// A group of G threads (32..1024) owns one row and holds all of it in registers, VPT 16-byte
+// vectors per thread, so x is read exactly once: the second pass of variants 1-3 (an L2
+// re-read that still costs L2 bandwidth and, on the RTX 5090, the 96 MB L2 does not always
+// keep) is gone, and traffic is at the floor of one read plus one write. Rows up to 32 K
+// elements qualify (1024 threads x 32 elements); wider or unaligned rows fall back to
+// variant 3. The group reduction is a warp shuffle plus, for G > 32, one shared-memory
+// exchange between the group's warps.
+// ---------------------------------------------------------------------------
+constexpr int kMaxElemsPerThread = 32;
+
+template <int G>
+struct Group {
+    static constexpr int kBlock = G < 256 ? 256 : G;
+    static constexpr int kRowsPerBlock = kBlock / G;
+    static constexpr int kWarps = G / kWarpSize;
+    static_assert(G % kWarpSize == 0 && kBlock % G == 0, "G must be a multiple of 32");
+};
+
+// Sum `v` over the G threads of the calling thread's group; every thread gets the result.
+// Must be reached by all threads of the block (it may __syncthreads).
+template <int G>
+__device__ __forceinline__ float group_reduce_sum(float v, float* red, int tid) {
+    v = warp_reduce_sum(v);
+    if constexpr (Group<G>::kWarps > 1) {
+        if ((tid & (kWarpSize - 1)) == 0) red[tid >> 5] = v;
+        __syncthreads();
+        const int first = (tid / G) * Group<G>::kWarps;
+        v = 0.0f;
+#pragma unroll
+        for (int k = 0; k < Group<G>::kWarps; ++k) v += red[first + k];
+    }
+    return v;
+}
+
+template <typename T, int G, int VPT>
+__global__ void __launch_bounds__(Group<G>::kBlock)
+    rmsnorm_reg_kernel(const T* __restrict__ x, const T* __restrict__ w, T* __restrict__ out,
+                       int rows, int cols, float eps) {
+    using VT = VecTraits<T>;
+    constexpr int kW = VT::kWidth;
+    __shared__ float red[Group<G>::kBlock / kWarpSize];
+
+    const int tid = threadIdx.x;
+    const int t = tid % G;
+    const int row = blockIdx.x * Group<G>::kRowsPerBlock + tid / G;
+    const bool active = row < rows;  // no early return: the group reduction may sync
+    const int nvec = cols / kW;
+    const T* xr = x + static_cast<int64_t>(row) * cols;
+
+    float v[VPT][kW];
+    float sumsq = 0.0f;
+    if (active) {
+#pragma unroll
+        for (int i = 0; i < VPT; ++i) {
+            const int idx = t + i * G;  // consecutive threads, consecutive 16-byte chunks
+            if (idx < nvec) {
+                VT::load(xr + idx * kW, v[i]);
+#pragma unroll
+                for (int e = 0; e < kW; ++e) sumsq += v[i][e] * v[i][e];
+            }
+        }
+    }
+    sumsq = group_reduce_sum<G>(sumsq, red, tid);
+    if (!active) return;
+    const float inv = rsqrtf(sumsq / static_cast<float>(cols) + eps);
+    T* orow = out + static_cast<int64_t>(row) * cols;
+#pragma unroll
+    for (int i = 0; i < VPT; ++i) {
+        const int idx = t + i * G;
+        if (idx < nvec) {
+            float wv[kW];
+            float o[kW];
+            VT::load(w + idx * kW, wv);
+#pragma unroll
+            for (int e = 0; e < kW; ++e) o[e] = v[i][e] * inv * wv[e];
+            VT::store(orow + idx * kW, o);
+        }
+    }
+}
+
+// Fused residual-add + RMSNorm with the same single-pass design: x and resid are read once,
+// the bf16-rounded sum is stored to resid and kept in registers for the normalize.
+template <int G, int VPT>
+__global__ void __launch_bounds__(Group<G>::kBlock)
+    add_rmsnorm_reg_kernel(const __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ resid,
+                           const __nv_bfloat16* __restrict__ w, __nv_bfloat16* __restrict__ out,
+                           int rows, int cols, float eps) {
+    using VT = VecTraits<__nv_bfloat16>;
+    constexpr int kW = VT::kWidth;
+    __shared__ float red[Group<G>::kBlock / kWarpSize];
+
+    const int tid = threadIdx.x;
+    const int t = tid % G;
+    const int row = blockIdx.x * Group<G>::kRowsPerBlock + tid / G;
+    const bool active = row < rows;
+    const int nvec = cols / kW;
+    const int64_t off = static_cast<int64_t>(row) * cols;
+
+    float sv[VPT][kW];
+    float sumsq = 0.0f;
+    if (active) {
+#pragma unroll
+        for (int i = 0; i < VPT; ++i) {
+            const int idx = t + i * G;
+            if (idx < nvec) {
+                float xv[kW];
+                float rv[kW];
+                VT::load(x + off + idx * kW, xv);
+                VT::load(resid + off + idx * kW, rv);
+#pragma unroll
+                for (int e = 0; e < kW; ++e) {
+                    // Round to bf16 first so the stored residual and the value normalized
+                    // agree exactly (PyTorch semantics of a bf16 `resid += x` then a norm).
+                    const float s = __bfloat162float(__float2bfloat16(xv[e] + rv[e]));
+                    sv[i][e] = s;
+                    sumsq += s * s;
+                }
+                VT::store(resid + off + idx * kW, sv[i]);
+            }
+        }
+    }
+    sumsq = group_reduce_sum<G>(sumsq, red, tid);
+    if (!active) return;
+    const float inv = rsqrtf(sumsq / static_cast<float>(cols) + eps);
+#pragma unroll
+    for (int i = 0; i < VPT; ++i) {
+        const int idx = t + i * G;
+        if (idx < nvec) {
+            float wv[kW];
+            float o[kW];
+            VT::load(w + idx * kW, wv);
+#pragma unroll
+            for (int e = 0; e < kW; ++e) o[e] = sv[i][e] * inv * wv[e];
+            VT::store(out + off + idx * kW, o);
+        }
+    }
+}
+
+// Launch helpers: pick the smallest group whose registers hold the row, then the vector
+// count. `Launch` is a functor template <G, VPT> that issues the kernel.
+template <typename T, int G, template <int, int> class Launch>
+bool launch_group(int nvec) {
+    constexpr int kMaxVPT = kMaxElemsPerThread / VecTraits<T>::kWidth;  // 8 f32, 4 bf16
+    const int need = cdiv(nvec, G);
+    if (need > kMaxVPT) return false;
+    if (need <= 1) {
+        Launch<G, 1>::run();
+    } else if (need <= 2) {
+        Launch<G, 2>::run();
+    } else if (need <= 4) {
+        Launch<G, 4>::run();
+    } else {
+        if constexpr (kMaxVPT >= 8) Launch<G, 8>::run();
+    }
+    return true;
+}
+
+template <typename T, template <int, int> class Launch>
+bool launch_reg(int cols) {
+    const int nvec = cols / VecTraits<T>::kWidth;
+    return launch_group<T, 32, Launch>(nvec) || launch_group<T, 64, Launch>(nvec) ||
+           launch_group<T, 128, Launch>(nvec) || launch_group<T, 256, Launch>(nvec) ||
+           launch_group<T, 512, Launch>(nvec) || launch_group<T, 1024, Launch>(nvec);
+}
+
+// Kernel arguments travel through a static so the functor templates above stay argument-free.
+template <typename T>
+struct RmsArgs {
+    const T* x;
+    const T* w;
+    T* out;
+    int rows, cols;
+    float eps;
+    cudaStream_t stream;
+    static RmsArgs& get() {
+        static RmsArgs a;
+        return a;
+    }
+};
+
+template <typename T>
+struct RmsLaunch {
+    template <int G, int VPT>
+    struct L {
+        static void run() {
+            const RmsArgs<T>& a = RmsArgs<T>::get();
+            const int grid = cdiv(a.rows, Group<G>::kRowsPerBlock);
+            rmsnorm_reg_kernel<T, G, VPT>
+                <<<grid, Group<G>::kBlock, 0, a.stream>>>(a.x, a.w, a.out, a.rows, a.cols, a.eps);
+        }
+    };
+};
+
+struct AddRmsArgs {
+    const __nv_bfloat16* x;
+    __nv_bfloat16* resid;
+    const __nv_bfloat16* w;
+    __nv_bfloat16* out;
+    int rows, cols;
+    float eps;
+    cudaStream_t stream;
+    static AddRmsArgs& get() {
+        static AddRmsArgs a;
+        return a;
+    }
+};
+
+template <int G, int VPT>
+struct AddRmsLaunch {
+    static void run() {
+        const AddRmsArgs& a = AddRmsArgs::get();
+        const int grid = cdiv(a.rows, Group<G>::kRowsPerBlock);
+        add_rmsnorm_reg_kernel<G, VPT><<<grid, Group<G>::kBlock, 0, a.stream>>>(
+            a.x, a.resid, a.w, a.out, a.rows, a.cols, a.eps);
+    }
+};
+
+// True if the single-pass kernel can take this input (alignment, vector width, row length).
+template <typename T>
+bool reg_ok(const void* x, const void* w, const void* out, int cols) {
+    return cols % VecTraits<T>::kWidth == 0 && is_aligned16(x) && is_aligned16(w) &&
+           is_aligned16(out) && cols <= 1024 * kMaxElemsPerThread;
+}
+
+// ---------------------------------------------------------------------------
 // Host dispatch shared by both element types.
 // ---------------------------------------------------------------------------
 template <typename T>
@@ -248,7 +476,7 @@ void rmsnorm_dispatch(const T* x, const T* w, T* out, int rows, int cols, float 
                       cudaStream_t stream) {
     SPARK_REQUIRE(rows >= 0 && cols > 0, "rmsnorm: rows must be >= 0 and cols > 0");
     SPARK_REQUIRE(variant >= 0 && variant < rmsnorm_num_variants(),
-                  "rmsnorm: variant must be in [0, 3]");
+                  "rmsnorm: variant must be in [0, 4]");
     SPARK_REQUIRE(x != nullptr && w != nullptr && out != nullptr, "rmsnorm: null pointer");
     if (rows == 0) return;
 
@@ -276,6 +504,13 @@ void rmsnorm_dispatch(const T* x, const T* w, T* out, int rows, int cols, float 
                 <<<grid, kWarps * kWarpSize, 0, stream>>>(x, w, out, rows, cols, eps);
             break;
         }
+        case 4: {
+            if (reg_ok<T>(x, w, out, cols)) {
+                RmsArgs<T>::get() = {x, w, out, rows, cols, eps, stream};
+                if (launch_reg<T, RmsLaunch<T>::template L>(cols)) break;
+            }
+            [[fallthrough]];  // unaligned, ragged or > 32 K wide: variant 3 takes anything
+        }
         case 3: {
             constexpr int kBlock = 256;
             rmsnorm_block_kernel<T, kBlock>
@@ -291,7 +526,7 @@ void rmsnorm_dispatch(const T* x, const T* w, T* out, int rows, int cols, float 
 }  // namespace
 
 int rmsnorm_num_variants() {
-    return 4;
+    return 5;
 }
 
 void rmsnorm_f32(const float* x, const float* w, float* out, int rows, int cols, float eps,
@@ -313,7 +548,14 @@ void add_rmsnorm_bf16(const __nv_bfloat16* x, __nv_bfloat16* resid, const __nv_b
     SPARK_REQUIRE(is_aligned16(x) && is_aligned16(resid) && is_aligned16(w) && is_aligned16(out),
                   "add_rmsnorm_bf16: x, resid, w and out must be 16-byte aligned");
     if (rows == 0) return;
-    constexpr int kWarps = 8;
+    if (cols <= 1024 * kMaxElemsPerThread) {  // single pass, row in registers
+        AddRmsArgs::get() = {x, resid, w, out, rows, cols, eps, stream};
+        if (launch_reg<__nv_bfloat16, AddRmsLaunch>(cols)) {
+            SPARK_CHECK_LAUNCH();
+            return;
+        }
+    }
+    constexpr int kWarps = 8;  // wider rows: warp per row, two passes
     const int grid = cdiv(rows, kWarps);
     add_rmsnorm_bf16_kernel<kWarps>
         <<<grid, kWarps * kWarpSize, 0, stream>>>(x, resid, w, out, rows, cols, eps);
