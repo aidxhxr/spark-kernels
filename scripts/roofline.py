@@ -20,6 +20,7 @@ from shape_utils import (  # noqa: E402
     flops,
     is_reference,
     load_bench_rows,
+    measured_peaks,
     parse_shape,
     peaks_for_rows,
     traffic_bytes,
@@ -80,7 +81,7 @@ def main() -> int:
             best[key] = r
 
     try:
-        device, peaks = peaks_for_rows(rows, args.bf16_peak)
+        device, peaks = peaks_for_rows(rows, args.bf16_peak, measured_peaks(RESULTS))
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
@@ -93,7 +94,7 @@ def main() -> int:
         if not tflops:  # unknown for this device (RTX 5090 bf16 until measured)
             continue
         ax.plot(ai, [min(bw * x, tflops * 1e12) / 1e12 for x in ai], color=color, lw=1.5,
-                label=f"{label}: {tflops:g} TFLOPS")
+                label=f"{label}: {tflops:.0f} TFLOPS")
         ax.axvline(tflops * 1e12 / bw, color=color, ls=":", lw=0.8)
 
     by_kernel: dict[str, list[dict]] = defaultdict(list)

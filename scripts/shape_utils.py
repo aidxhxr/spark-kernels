@@ -25,6 +25,10 @@ DEFAULT_DEVICE = "RTX 5090"  # rows written before the benches recorded a device
 ITEMSIZE = {"f32": 4, "bf16": 2, "fp32": 4, "float32": 4, "bfloat16": 2}
 
 TORCH_COMPARISON = "torch_comparison.json"
+# Written by bench_peak: measured mma.sync bf16 and fp32 FMA peaks, plus the SM clock they were
+# measured at. When present it overrides the spec-sheet compute peaks above (the memory
+# bandwidth stays the spec figure, which cudaMemcpy never reaches).
+PEAK_FILE = "peak.json"
 
 # The C++ benches name some rows after the entry point they time rather than the kernel family
 # everything here keys on (tables, peaks, traffic, FLOPs, the torch comparison).
@@ -64,8 +68,29 @@ def device_key(device_name: str | None) -> str:
     )
 
 
-def peaks_for_rows(rows: list[dict], bf16_peak: float | None = None) -> tuple[str, dict]:
-    """(device key, peaks) for a set of bench rows, which must all come from one device."""
+def measured_peaks(results_dir: Path) -> dict:
+    """Peaks from results/peak.json (bench_peak), keyed like DEVICE_PEAKS plus "sm_mhz" and
+    "device"; empty if the bench has not been run."""
+    p = results_dir / PEAK_FILE
+    if not p.exists():
+        return {}
+    out: dict = {}
+    for r in load_jsonl(p):
+        out.setdefault("device", r.get("device"))
+        if r.get("kernel") == "peak_bf16_mma":
+            out["bf16_tflops"] = r["tflops"]
+        elif r.get("kernel") == "peak_fp32_fma":
+            out["fp32_tflops"] = r["tflops"]
+        elif r.get("kernel") == "sm_clock":
+            out["sm_mhz"] = r["ref_ms"]  # bench_peak parks the clock in the free column
+    return out
+
+
+def peaks_for_rows(rows: list[dict], bf16_peak: float | None = None,
+                   measured: dict | None = None) -> tuple[str, dict]:
+    """(device key, peaks) for a set of bench rows, which must all come from one device.
+    `measured` (see measured_peaks) replaces the compute peaks when it is from that device;
+    an explicit `bf16_peak` wins over both."""
     keys = {device_key(r.get("device")) for r in rows}
     if len(keys) > 1:
         raise ValueError(
@@ -73,6 +98,11 @@ def peaks_for_rows(rows: list[dict], bf16_peak: float | None = None) -> tuple[st
         )
     key = keys.pop() if keys else DEFAULT_DEVICE
     peaks = dict(DEVICE_PEAKS[key])
+    if measured and device_key(measured.get("device")) == key:
+        for k in ("bf16_tflops", "fp32_tflops", "sm_mhz"):
+            if measured.get(k):
+                peaks[k] = measured[k]
+        peaks["measured"] = True
     if bf16_peak:
         peaks["bf16_tflops"] = bf16_peak
     return key, peaks
@@ -99,7 +129,7 @@ def load_bench_rows(results_dir: Path) -> list[dict]:
     """Every row written by the C++ benches (results/*.json minus the torch comparison)."""
     rows: list[dict] = []
     for p in sorted(results_dir.glob("*.json")):
-        if p.name != TORCH_COMPARISON:
+        if p.name not in (TORCH_COMPARISON, PEAK_FILE):
             rows.extend(normalize_row(r) for r in load_jsonl(p))
     return rows
 
